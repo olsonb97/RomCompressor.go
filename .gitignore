@@ -1,0 +1,14 @@
+/romcompressor
+/romcompressor.exe
+/dist/
+/coverage.out
+/PROJECT_STATUS.md
+/.tmp/
+/.audit-*/
+__pycache__/
+*.py[cod]
+*.log
+*.prof
+.DS_Store
+*.test
+*.test.exe
