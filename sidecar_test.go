@@ -41,6 +41,46 @@ func TestDiscSidecarFollowsRenamedConversionAndRestoration(t *testing.T) {
 	}
 }
 
+func TestSharedSBIReplacedDuringConversion(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "original.iso")
+	sidecar := filepath.Join(dir, "original.sbi")
+	shared := filepath.Join(dir, "restored.sbi")
+	output := filepath.Join(dir, "restored.cso")
+	if err := os.WriteFile(source, make([]byte, 8192), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sidecar, []byte("SBI\x00original"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(sidecar, shared); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+	replaced := false
+	replacement := []byte("SBI\x00unrelated")
+	_, err := Convert(t.Context(), source, output, Options{Format: CSO, Progress: func(p Progress) {
+		if replaced || p.Phase != "converting" {
+			return
+		}
+		replaced = true
+		if err := os.Remove(shared); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(shared, replacement, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}})
+	if err == nil || !replaced {
+		t.Fatalf("conversion accepted a changed companion: %v", err)
+	}
+	if _, err := os.Lstat(output); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("output exists: %v", err)
+	}
+	if data, err := os.ReadFile(shared); err != nil || !bytes.Equal(data, replacement) {
+		t.Fatalf("replacement companion changed: %v", err)
+	}
+}
+
 func TestDiscSidecarPreservesEverySuffixCase(t *testing.T) {
 	for _, suffix := range []string{".sbi", ".sbI", ".sBi", ".sBI", ".Sbi", ".SbI", ".SBi", ".SBI"} {
 		t.Run(suffix, func(t *testing.T) {
@@ -115,7 +155,7 @@ func TestDiscSidecarEverySuffixCasePreventsDestinationCollision(t *testing.T) {
 }
 
 func TestDiscSidecarCollisionAndMutationPublishNothing(t *testing.T) {
-	for _, scenario := range []string{"collision", "mutation", "invalid", "limit"} {
+	for _, scenario := range []string{"collision", "mutation", "invalid", "invalid shared", "limit"} {
 		t.Run(scenario, func(t *testing.T) {
 			dir := t.TempDir()
 			source := filepath.Join(dir, "game.iso")
@@ -138,8 +178,11 @@ func TestDiscSidecarCollisionAndMutationPublishNothing(t *testing.T) {
 						_ = os.WriteFile(inputSBI, []byte("SBI\x00changed length"), 0600)
 					}
 				}
-			case "invalid":
+			case "invalid", "invalid shared":
 				data = []byte("bad companion")
+				if scenario == "invalid shared" {
+					output = filepath.Join(dir, "game.cso")
+				}
 			case "limit":
 				data = append([]byte("SBI\x00"), make([]byte, 8188)...)
 				opts.MaxOutput = 8192
@@ -152,6 +195,11 @@ func TestDiscSidecarCollisionAndMutationPublishNothing(t *testing.T) {
 			}
 			if _, err := os.Stat(output); !os.IsNotExist(err) {
 				t.Fatal("partial output published")
+			}
+			if scenario == "invalid shared" {
+				if got, err := os.ReadFile(inputSBI); err != nil || !bytes.Equal(got, data) {
+					t.Fatalf("existing shared companion changed: %v", err)
+				}
 			}
 			if scenario == "collision" {
 				got, _ := os.ReadFile(outputSBI)

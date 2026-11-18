@@ -88,8 +88,7 @@ func TestWUXRoundTripIntegration(t *testing.T) {
 		t.Skip("set ROMCOMPRESSOR_JWUDTOOL to an installed JWUDTool JAR; this test writes a full-size WUD")
 	}
 	const discSize = 0x5d3a00000
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-	defer cancel()
+	ctx := t.Context()
 	dir := t.TempDir()
 	source := filepath.Join(dir, "source.wud")
 	file, err := os.OpenFile(source, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
@@ -147,8 +146,7 @@ func TestNSZRoundTripIntegration(t *testing.T) {
 			if source == "" {
 				t.Skipf("set %s to an explicitly selected fixture", tc.env)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-			defer cancel()
+			ctx := t.Context()
 			dir := t.TempDir()
 			compressed := filepath.Join(dir, "game."+string(tc.format))
 			restored := filepath.Join(dir, "restored"+tc.ext)

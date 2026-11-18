@@ -133,6 +133,10 @@ func TestSplitWBFSVerifyDetectsCompanionMutation(t *testing.T) {
 func TestSplitWBFSFailurePreservesFiles(t *testing.T) {
 	source, paths, volume := makeSplitWBFS(t)
 	ctx := context.Background()
+	plan, err := PlanConversions(ctx, source, Options{})
+	if err != nil || planHas(plan, SevenZip, "") || !planHas(plan, Raw, "") {
+		t.Fatalf("incorrect split WBFS targets: %+v, %v", plan.Targets, err)
+	}
 	for _, test := range []struct {
 		name string
 		opts Options

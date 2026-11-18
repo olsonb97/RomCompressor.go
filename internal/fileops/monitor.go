@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 )
 
@@ -57,7 +58,7 @@ func Scan(ctx context.Context, stage string, limit int64, maxEntries int) error 
 	var total int64
 	pending := []string{stage}
 	scanDirectory := func(path string) error {
-		before, err := os.Lstat(path)
+		before, err := SnapshotStat(path, os.Lstat)
 		if err != nil {
 			return err
 		}
@@ -87,10 +88,10 @@ func Scan(ctx context.Context, stage string, limit int64, maxEntries int) error 
 					return fmt.Errorf("staging exceeds %d entries", maxEntries)
 				}
 				info, err := entry.Info()
-				if os.IsNotExist(err) {
-					continue
-				}
 				if err != nil {
+					if scratchEntryGone(ctx, filepath.Join(path, entry.Name()), err) {
+						continue
+					}
 					return err
 				}
 				switch info.Mode().Type() {
@@ -121,9 +122,37 @@ func Scan(ctx context.Context, stage string, limit int64, maxEntries int) error 
 		path := pending[last]
 		pending[last] = ""
 		pending = pending[:last]
-		if err := scanDirectory(path); err != nil && !os.IsNotExist(err) {
+		if err := scanDirectory(path); err != nil {
+			if path != stage && scratchEntryGone(ctx, path, err) {
+				continue
+			}
 			return err
 		}
 	}
 	return ctx.Err()
+}
+
+func scratchEntryGone(ctx context.Context, path string, err error) bool {
+	if os.IsNotExist(err) {
+		return true
+	}
+	if runtime.GOOS != "windows" || !os.IsPermission(err) {
+		return false
+	}
+	// NTFS may report access denied while a scratch entry is being deleted.
+	// Skip it only if a fresh lookup confirms that it disappeared.
+	for _, delay := range [...]time.Duration{0, 10 * time.Millisecond, 90 * time.Millisecond} {
+		if delay > 0 {
+			select {
+			case <-ctx.Done():
+				return false
+			case <-time.After(delay):
+			}
+		}
+		_, statErr := os.Lstat(path)
+		if os.IsNotExist(statErr) {
+			return true
+		}
+	}
+	return false
 }

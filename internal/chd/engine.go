@@ -24,21 +24,7 @@ func Convert(ctx context.Context, tool, source, output string, extract bool, med
 		if media == "hdd" {
 			return extractHDDCHD(ctx, tool, source, output, limit)
 		}
-		if err = Verify(ctx, tool, source, limit, "cd"); err != nil {
-			return err
-		}
-		if strings.ToLower(filepath.Ext(output)) != ".cue" {
-			return fmt.Errorf("CD extraction requires a .cue output filename")
-		}
-		binPath := strings.TrimSuffix(output, filepath.Ext(output)) + ".bin"
-		log, err := process.Run(ctx, tool, "extractcd", "-i", source, "-o", output, "-ob", binPath)
-		if err != nil {
-			return err
-		}
-		if err := verifyCHDCDExtraction(log); err != nil {
-			return err
-		}
-		return verifyRestoredCHDCD(ctx, source, output, binPath, limit)
+		return extractCDCHD(ctx, tool, source, output, limit)
 	}
 	ext := strings.ToLower(filepath.Ext(source))
 	if media == "" && (ext == ".cue" || ext == ".gdi") {
@@ -46,24 +32,8 @@ func Convert(ctx context.Context, tool, source, output string, extract bool, med
 	}
 	switch media {
 	case "cd":
-		// chdman treats unknown extensions as cdrdao descriptors. Only CUE and
-		// GDI references have been validated by the conversion lifecycle.
-		switch ext {
-		case ".cue":
-			if err := ValidateCUE(source, "", limit); err != nil {
-				return err
-			}
-		case ".gdi":
-			if err := ValidateGDI(source, limit); err != nil {
-				return err
-			}
-		case ".nrg":
-			if err := ValidateNRG(ctx, source, limit); err != nil {
-				return err
-			}
-		case ".iso", ".cdr", ".toast":
-		default:
-			return fmt.Errorf("CD CHD input must be a CUE/GDI descriptor or an ISO, CDR, Toast, or NRG image")
+		if err := ValidateCDSource(ctx, source, limit); err != nil {
+			return err
 		}
 	case "dvd":
 		if ext != ".iso" {
@@ -81,7 +51,13 @@ func Convert(ctx context.Context, tool, source, output string, extract bool, med
 	if _, err = process.Run(ctx, tool, "createcd", "-i", source, "-o", output, "-np", "2"); err != nil {
 		return err
 	}
-	return Verify(ctx, tool, output, limit, "cd")
+	if err := Verify(ctx, tool, output, limit, "cd"); err != nil {
+		return err
+	}
+	if ext == ".cue" {
+		return verifyCreatedCUE(ctx, source, output, limit)
+	}
+	return nil
 }
 
 // IsHardDiskExtension reports supported raw hard-drive image extensions.
@@ -93,9 +69,42 @@ func IsHardDiskExtension(ext string) bool {
 	return false
 }
 
+// RestoredSize checks the extraction layout and reports known raw file bytes.
+// CD sizes exclude the generated CUE. Legacy CD layouts return -1.
+func RestoredSize(ctx context.Context, path string, limit int64, media string) (int64, error) {
+	if media == "cd" {
+		layout, err := cdExtractionLayout(ctx, path, limit)
+		if err != nil || len(layout.tracks) == 0 {
+			return -1, err
+		}
+		var size int64
+		for _, track := range layout.tracks {
+			size += (track.frames - track.padFrames) * track.sectorBytes
+		}
+		if size > limit {
+			return -1, fmt.Errorf("restored CD tracks exceed the output limit")
+		}
+		return size, nil
+	}
+	if media != "dvd" && media != "hdd" {
+		return -1, fmt.Errorf("CHD extraction requires media cd, dvd, or hdd")
+	}
+	if _, err := MetadataFile(ctx, path, limit, media); err != nil {
+		return -1, err
+	}
+	var image rawCHD
+	var err error
+	if media == "dvd" {
+		image, err = readDVDCHD(path)
+	} else {
+		image, err = readHDDCHD(ctx, path, limit)
+	}
+	return image.size, err
+}
+
 // Verify checks metadata bounds and requires explicit engine checksum confirmation.
 func Verify(ctx context.Context, tool, path string, limit int64, media string) error {
-	version, err := MetadataFile(path, limit, media)
+	version, err := MetadataFile(ctx, path, limit, media)
 	if err != nil {
 		return err
 	}

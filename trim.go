@@ -239,10 +239,6 @@ func readTrimLayout(ctx context.Context, input *os.File, size int64) (TrimPlan, 
 	return plan, ctx.Err()
 }
 
-func trimPadding(ctx context.Context, input io.Reader, size int64) (byte, error) {
-	return scanTrimPadding(ctx, input, size, nil)
-}
-
 func scanTrimPadding(ctx context.Context, input io.Reader, size int64, progress func(int64)) (byte, error) {
 	reader := &fileops.ContextReader{Context: ctx, Reader: input}
 	var marker [1]byte

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -87,10 +88,11 @@ func TestEngineDiagnosticHelper(t *testing.T) {
 		return
 	}
 	_, _ = os.Stderr.WriteString(testDiagnosticOutput())
+	// A simulated engine must not append the Go test binary's coverage log.
 	if mode == "failure" {
-		os.Exit(3)
+		syscall.Exit(3)
 	}
-	os.Exit(0)
+	syscall.Exit(0)
 }
 
 func testDiagnosticOutput() string {
@@ -126,7 +128,7 @@ func TestEngineSuccessOutputIsUnchanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	if output != testDiagnosticOutput() {
-		t.Fatal("successful tool output was truncated")
+		t.Fatalf("unexpected engine output (%d bytes), ending in %q", len(output), output[max(0, len(output)-200):])
 	}
 }
 

@@ -31,7 +31,7 @@ func createHDDCHD(ctx context.Context, tool, source, output string, limit int64)
 	if _, err := process.Run(ctx, tool, "createhd", "-i", source, "-o", output, "-ss", "512", "-chs", chs, "-np", "2"); err != nil {
 		return err
 	}
-	image, err := readHDDCHD(output, limit)
+	image, err := readHDDCHD(ctx, output, limit)
 	if err != nil {
 		return err
 	}
@@ -45,7 +45,7 @@ func createHDDCHD(ctx context.Context, tool, source, output string, limit int64)
 }
 
 func extractHDDCHD(ctx context.Context, tool, source, output string, limit int64) error {
-	image, err := readHDDCHD(source, limit)
+	image, err := readHDDCHD(ctx, source, limit)
 	if err != nil {
 		return err
 	}
@@ -72,7 +72,7 @@ func exactHDDGeometry(total int64) (cylinders, heads, sectors int64) {
 	return total, 1, 1
 }
 
-func readHDDCHD(path string, limit int64) (rawCHD, error) {
+func readHDDCHD(ctx context.Context, path string, limit int64) (rawCHD, error) {
 	file, info, err := fileops.OpenRegular(path)
 	if err != nil {
 		return rawCHD{}, err
@@ -87,13 +87,13 @@ func readHDDCHD(path string, limit int64) (rawCHD, error) {
 		return rawCHD{}, fmt.Errorf("hard-drive CHD exceeds the expanded size limit")
 	}
 	firstMeta := binary.BigEndian.Uint64(header[48:56])
-	return image, checkHDDMetadata(file, uint64(info.Size()), firstMeta, image)
+	return image, checkHDDMetadata(ctx, file, uint64(info.Size()), firstMeta, image)
 }
 
-func checkHDDMetadata(src io.ReaderAt, size, offset uint64, image rawCHD) error {
+func checkHDDMetadata(ctx context.Context, src io.ReaderAt, size, offset uint64, image rawCHD) error {
 	const maxGeometryBytes = 128
 	foundGeometry := false
-	err := walkCHDMetadata(src, size, chdV5HeaderSize, offset, func(entry chdMetadata) error {
+	err := walkCHDMetadata(ctx, src, size, chdV5HeaderSize, offset, func(entry chdMetadata) error {
 		switch entry.tag {
 		case "GDDD":
 			if foundGeometry || entry.length < 2 || entry.length > maxGeometryBytes || entry.flags&1 == 0 {

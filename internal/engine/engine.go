@@ -67,6 +67,9 @@ func Verify(ctx context.Context, path string, format string, opts Config) error 
 		}
 		return chd.Verify(ctx, tool, path, opts.MaxOutput, opts.Media)
 	case kind.Dolphin(format):
+		if _, err := DolphinDiscSize(path, format, opts.MaxOutput); err != nil {
+			return err
+		}
 		tool, err := resolveTool(opts, "dolphin-tool")
 		if err != nil {
 			return err

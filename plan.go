@@ -9,6 +9,7 @@ import (
 
 	"github.com/olsonb97/romcompressor.go/internal/chd"
 	"github.com/olsonb97/romcompressor.go/internal/codec"
+	"github.com/olsonb97/romcompressor.go/internal/engine"
 	"github.com/olsonb97/romcompressor.go/internal/fileops"
 )
 
@@ -104,15 +105,19 @@ func PlanConversions(ctx context.Context, source string, opts Options) (Conversi
 	if !fileops.SameSnapshot(stat, inputs[source]) {
 		return ConversionPlan{}, fmt.Errorf("source changed during inspection")
 	}
+	var wbfs *wbfsInput
 	if plan.Input.Format == WBFS {
-		input, err := openWBFSInput(ctx, source)
+		wbfs, err = openWBFSInput(ctx, source)
 		if err != nil {
 			return ConversionPlan{}, err
 		}
-		input.addToSnapshot(inputs)
-		input.close()
+		wbfs.addToSnapshot(inputs)
+		wbfs.close()
 	}
 	for _, candidate := range conversionCandidates(plan.Input, false) {
+		if wbfs != nil && !wbfs.supportsOutput(candidate.Format) {
+			continue
+		}
 		choice := opts
 		choice.Format, choice.Media = candidate.Format, candidate.Media
 		if err := preflightSource(ctx, source, plan.Input, choice); err != nil {
@@ -120,6 +125,12 @@ func PlanConversions(ctx context.Context, source string, opts Options) (Conversi
 		}
 		candidate.Dependencies = []OperationCapability{conversionDependency(plan.Input.Format, candidate.Format, capabilities)}
 		candidate.Extension = conversionExtension(plan.Input.Format, candidate.Format, candidate.Media)
+		if plan.Input.Format == CHD && candidate.Format == Raw && candidate.Media == "cd" {
+			candidate.Extension, _, err = chd.CDOutput(ctx, source, opts.MaxOutput)
+			if err != nil {
+				return ConversionPlan{}, err
+			}
+		}
 		if candidate.Format == Raw && plan.Input.Format == ZIP {
 			selected, all, err := planZIP(ctx, source, opts.MaxOutput)
 			if err != nil {
@@ -253,13 +264,22 @@ func planZIP(ctx context.Context, source string, limit int64) (bool, bool, error
 	if err != nil {
 		return false, false, err
 	}
+	// A member is selectable by name only when exactly one file matches it.
+	names := make(map[string]int)
+	for _, member := range archive.File {
+		if !member.Mode().IsDir() {
+			names[member.Name]++
+		}
+	}
 	selected := false
 	for index, member := range archive.File {
 		if err := ctx.Err(); err != nil {
 			return false, false, err
 		}
-		if !member.FileInfo().IsDir() && member.UncompressedSize64 <= uint64(limit) && archive.ValidateMember(index) == nil {
+		if !member.Mode().IsDir() && names[member.Name] == 1 && (member.Name != "" || len(names) == 1) &&
+			member.UncompressedSize64 <= uint64(limit) && archive.ValidateMember(index) == nil {
 			selected = true
+			break
 		}
 	}
 	_, _, _, treeErr := readZIPTree(ctx, file, stat.Size(), limit)
@@ -352,7 +372,7 @@ func planPlaylist(ctx context.Context, plan ConversionPlan, opts Options, capabi
 			choice := opts
 			choice.Format, choice.Media = candidate.Format, candidate.Media
 			if candidate.Format == Raw {
-				choice, _, err = playlistRestoreOptions(disc.path, infos[i], choice)
+				choice, _, _, err = playlistRestoreOptions(ctx, disc.path, infos[i], choice)
 				if err != nil {
 					valid = false
 					break
@@ -366,14 +386,8 @@ func planPlaylist(ctx context.Context, plan ConversionPlan, opts Options, capabi
 					valid = false
 					break
 				}
-				if native(candidate.Format) {
-					if _, err := preflightNativeInput(ctx, disc.path, infos[i], choice); err != nil {
-						valid = false
-						break
-					}
-				}
 				if candidate.Format == CHD {
-					if _, err := chd.MetadataFile(disc.path, opts.MaxOutput, choice.Media); err != nil {
+					if _, err := chd.MetadataFile(ctx, disc.path, opts.MaxOutput, choice.Media); err != nil {
 						valid = false
 						break
 					}
@@ -389,15 +403,15 @@ func planPlaylist(ctx context.Context, plan ConversionPlan, opts Options, capabi
 					break
 				}
 				dependency = conversionDependency(infos[i].Format, candidate.Format, capabilities)
-				if candidate.Format == Raw && (native(infos[i].Format) || infos[i].Format == PBP) {
-					minimumBytes, err = preflightNativeInput(ctx, disc.path, infos[i], choice)
-					if err != nil {
-						valid = false
-						break
-					}
-					if minimumBytes < 0 {
-						minimumBytes = 0
-					}
+			}
+			if candidate.Format == Raw || candidate.Format == infos[i].Format {
+				size, err := playlistDiscSize(ctx, disc.path, infos[i], choice)
+				if err != nil {
+					valid = false
+					break
+				}
+				if candidate.Format == Raw {
+					minimumBytes = max(minimumBytes, size)
 				}
 			}
 			if minimumBytes > opts.MaxOutput-knownBytes {
@@ -422,4 +436,19 @@ func planPlaylist(ctx context.Context, plan ConversionPlan, opts Options, capabi
 		return ConversionPlan{}, err
 	}
 	return plan, ctx.Err()
+}
+
+// playlistDiscSize checks known logical sizes for both copies and restorations.
+// A negative value means the expanded size cannot be read from the header.
+func playlistDiscSize(ctx context.Context, source string, info FileInfo, opts Options) (int64, error) {
+	if info.Format == CHD && opts.Format == Raw {
+		return chd.RestoredSize(ctx, source, opts.MaxOutput, opts.Media)
+	}
+	if dolphinFormat(info.Format) {
+		return engine.DolphinDiscSize(source, string(info.Format), opts.MaxOutput)
+	}
+	if native(info.Format) || info.Format == PBP {
+		return preflightNativeInput(ctx, source, info, opts)
+	}
+	return -1, ctx.Err()
 }

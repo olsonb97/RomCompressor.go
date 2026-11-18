@@ -108,7 +108,18 @@ func TestPlanConversionsChecksDiscGeometryAndSignatures(t *testing.T) {
 }
 
 func TestPlanConversionsZIPSelectionAndTreeSafety(t *testing.T) {
-	for _, names := range [][]string{{"one.bin"}, {"one.bin", "two.bin"}, {"../outside.bin"}, {"empty/"}} {
+	for _, tc := range []struct {
+		names         []string
+		selected, all bool
+	}{
+		{[]string{"one.bin"}, true, true},
+		{[]string{"one.bin", "two.bin"}, true, true},
+		{[]string{"../outside.bin"}, true, false},
+		{[]string{"empty/"}, false, true},
+		{[]string{"same.bin", "same.bin"}, false, false},
+		{[]string{"same.bin", "same.bin", "other.bin"}, true, false},
+	} {
+		names := tc.names
 		t.Run(strings.Join(names, "+"), func(t *testing.T) {
 			root := t.TempDir()
 			source := filepath.Join(root, "game.zip")
@@ -155,10 +166,332 @@ func TestPlanConversionsZIPSelectionAndTreeSafety(t *testing.T) {
 					}
 				}
 			}
-			if selected != !strings.HasSuffix(names[0], "/") || all != !strings.HasPrefix(names[0], "../") {
+			if selected != tc.selected || all != tc.all {
 				t.Fatalf("unsafe/empty archive handling: selected=%v all=%v %+v", selected, all, plan)
 			}
 		})
+	}
+}
+
+func TestExternalCompressionPreflightHonorsExpandedLimit(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "game.iso")
+	data := make([]byte, 65536)
+	binary.BigEndian.PutUint32(data[28:], 0xc2339f3d)
+	if err := os.WriteFile(source, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	opts := Options{MaxOutput: 4096, Tools: map[string]string{"7z": "unused", "dolphin-tool": "unused"}}
+	plan, err := PlanConversions(ctx, source, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, format := range []Format{SevenZip, RVZ, WIA, GCZ} {
+		if planHas(plan, format, "") {
+			t.Errorf("offered %s despite the expanded size limit", format)
+		}
+		opts.Format = format
+		if _, err := Convert(ctx, source, filepath.Join(root, "game."+string(format)), opts); err == nil || !strings.Contains(err.Error(), "size limit") {
+			t.Errorf("%s did not reject input before engine lookup: %v", format, err)
+		}
+	}
+	for _, tc := range []struct {
+		ext, magic string
+		offset     int
+		format     Format
+	}{
+		{".nsp", "PFS0", 0, NSZ}, {".xci", "HEAD", 0x100, XCZ},
+	} {
+		path := filepath.Join(root, "game"+tc.ext)
+		clear(data)
+		copy(data[tc.offset:], tc.magic)
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		plan, err := PlanConversions(ctx, path, opts)
+		if err != nil || planHas(plan, tc.format, "") {
+			t.Fatalf("offered oversized %s source: %+v, %v", tc.ext, plan.Targets, err)
+		}
+	}
+}
+
+func TestSwitchGamecardHeaderPreservation(t *testing.T) {
+	for _, ext := range []string{".xci", ".xcz"} {
+		t.Run(ext, func(t *testing.T) {
+			dir := t.TempDir()
+			src := filepath.Join(dir, "input"+ext)
+			target, dest := XCZ, filepath.Join(dir, "out.xcz")
+			if ext == ".xcz" {
+				target, dest = Raw, filepath.Join(dir, "out.xci")
+			}
+			header := make([]byte, 0xf004)
+			copy(header[0x100:], "HEAD")
+			binary.LittleEndian.PutUint64(header[0x130:], 0xf000)
+			copy(header[0xf000:], "HFS0")
+			for _, at := range []int{0x1ff, 0x200, 0x7000, 0xefff} {
+				header[at] = 1
+				if err := os.WriteFile(src, header, 0600); err != nil {
+					t.Fatal(err)
+				}
+				plan, err := PlanConversions(context.Background(), src, Options{})
+				if err != nil || planHas(plan, target, "") != (at < 0x200) || !planHas(plan, ZIP, "") {
+					t.Fatalf("offset %#x: plan %+v, %v", at, plan, err)
+				}
+				if at >= 0x200 {
+					_, err := Convert(context.Background(), src, dest, Options{Format: target})
+					if err == nil || !strings.Contains(err.Error(), "cannot preserve") {
+						t.Fatalf("offset %#x: expected refusal before engine or keys, got %v", at, err)
+					}
+					if _, err := os.Lstat(dest); !os.IsNotExist(err) {
+						t.Fatalf("refused conversion left an output: %v", err)
+					}
+				}
+				header[at] = 0
+			}
+		})
+	}
+}
+
+func TestPlanBareCDSectorGeometry(t *testing.T) {
+	for _, tc := range []struct {
+		size, limit int
+		valid       bool
+	}{
+		{0, 1 << 20, false}, {2049, 1 << 20, false},
+		{2048, 9791, false}, {2048, 9792, true},
+		{2336, 9792, true}, {2352, 9792, true},
+	} {
+		source := filepath.Join(t.TempDir(), "game.iso")
+		if err := os.WriteFile(source, make([]byte, tc.size), 0600); err != nil {
+			t.Fatal(err)
+		}
+		plan, err := PlanConversions(context.Background(), source, Options{MaxOutput: int64(tc.limit)})
+		if err != nil || planHas(plan, CHD, "cd") != tc.valid {
+			t.Errorf("CD with %d bytes and limit %d: %+v, %v", tc.size, tc.limit, plan.Targets, err)
+		}
+	}
+}
+
+func TestPlanCDDescriptorLogicalLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name, descriptor string
+		frames           int64
+	}{
+		{"disc.cue", "FILE a.bin BINARY\nTRACK 01 MODE1/2048\nINDEX 01 00:00:00\nFILE b.bin BINARY\nTRACK 02 MODE1/2048\nINDEX 01 00:00:00\n", 8},
+		{"disc.gdi", "2\n1 0 4 2048 a.bin 0\n2 9 4 2048 b.bin 0\n", 16},
+		{"disc.nrg", "", 8},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			source := filepath.Join(dir, tc.name)
+			data := []byte(tc.descriptor)
+			if tc.descriptor == "" {
+				data = testfixture.NRG(make([]byte, 5*2048), 0, 0)
+			}
+			for name, contents := range map[string][]byte{tc.name: data, "a.bin": make([]byte, 2048), "b.bin": make([]byte, 2*2048)} {
+				if err := os.WriteFile(filepath.Join(dir, name), contents, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, delta := range []int64{-1, 0} {
+				limit := tc.frames*2448 + delta
+				plan, err := PlanConversions(context.Background(), source, Options{MaxOutput: limit})
+				if err != nil || planHas(plan, CHD, "cd") != (delta == 0) {
+					t.Errorf("limit %d: %+v, %v", limit, plan.Targets, err)
+				}
+			}
+		})
+	}
+}
+
+func TestPlanCHDTrackRestoration(t *testing.T) {
+	for _, tc := range []struct {
+		title, fields string
+		allowed       bool
+	}{
+		{"mixed mode", "TYPE:MODE2_FORM_MIX SUBTYPE:NONE FRAMES:4 PREGAP:0 PGTYPE:MODE1 PGSUB:NONE POSTGAP:0", true},
+		{"subcode", "TYPE:AUDIO SUBTYPE:RW_RAW FRAMES:4 PREGAP:0 PGTYPE:MODE1 PGSUB:NONE POSTGAP:0", false},
+		{"separate stored pregap mode", "TYPE:MODE1_RAW SUBTYPE:NONE FRAMES:4 PREGAP:1 PGTYPE:VAUDIO PGSUB:NONE POSTGAP:0", false},
+		{"partial track table", "TYPE:AUDIO SUBTYPE:NONE FRAMES:8 PREGAP:0 PGTYPE:MODE1 PGSUB:NONE POSTGAP:0", false},
+	} {
+		t.Run(tc.title, func(t *testing.T) {
+			dir := t.TempDir()
+			image := filepath.Join(dir, "game.chd")
+			if err := os.WriteFile(image, testfixture.CDTrackHeader("TRACK:1 "+tc.fields), 0600); err != nil {
+				t.Fatal(err)
+			}
+			list := filepath.Join(dir, "game.m3u")
+			if err := os.WriteFile(list, []byte("game.chd\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			for _, source := range []string{image, list} {
+				plan, err := PlanConversions(context.Background(), source, Options{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if (planHas(plan, Raw, "cd") || planHas(plan, Raw, "")) != tc.allowed {
+					t.Fatalf("wrong restoration choice for %s: %+v", source, plan.Targets)
+				}
+			}
+		})
+	}
+}
+
+func TestMalformedGDROMDoesNotOfferRestoration(t *testing.T) {
+	for _, tag := range []string{"CHGD", "CHGT"} {
+		t.Run(tag, func(t *testing.T) {
+			dir := t.TempDir()
+			image, playlist := filepath.Join(dir, "disc.chd"), filepath.Join(dir, "set.m3u")
+			if err := os.WriteFile(image, testfixture.CHDMetadata(5, tag), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(playlist, []byte("disc.chd\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			for _, input := range []string{image, playlist} {
+				plan, err := PlanConversions(t.Context(), input, Options{})
+				if err != nil || planHas(plan, Raw, "cd") || planHas(plan, Raw, "") {
+					t.Fatalf("plan promised single-BIN restoration: %+v, %v", plan, err)
+				}
+			}
+			opts := Options{Format: Raw, Media: "cd", Tools: map[string]string{"chdman": filepath.Join(dir, "absent")}}
+			if _, err := Convert(t.Context(), image, filepath.Join(dir, "out.cue"), opts); err == nil || !strings.Contains(err.Error(), "GD-ROM") {
+				t.Fatalf("expected a layout error before engine lookup: %v", err)
+			}
+			if files, err := os.ReadDir(dir); err != nil || len(files) != 2 {
+				t.Fatalf("failed restoration left files: %v, %v", files, err)
+			}
+		})
+	}
+}
+
+func TestPlanGDROMRestoresAsGDI(t *testing.T) {
+	for _, tag := range []string{"CHGD", "CHGT"} {
+		t.Run(tag, func(t *testing.T) {
+			dir := t.TempDir()
+			image := filepath.Join(dir, "disc.chd")
+			data := testfixture.CDTrackHeader("TRACK:1 TYPE:AUDIO SUBTYPE:NONE FRAMES:4 PAD:0 PREGAP:0 PGTYPE:MODE1 PGSUB:NONE POSTGAP:0")
+			copy(data[124:128], tag)
+			if err := os.WriteFile(image, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			opts := Options{Format: Raw, Media: "cd", Tools: map[string]string{"chdman": filepath.Join(dir, "absent")}}
+			plan, err := PlanConversions(t.Context(), image, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var found bool
+			for _, target := range plan.Targets {
+				if target.Format == Raw && target.Media == "cd" {
+					found = target.Extension == ".gdi" && !target.Available
+				}
+			}
+			if !found {
+				t.Fatal("missing GDI target when chdman is unavailable")
+			}
+			if _, err := Convert(t.Context(), image, filepath.Join(dir, "out.cue"), opts); err == nil || !strings.Contains(err.Error(), ".gdi") {
+				t.Fatalf("single-BIN output was not refused before engine lookup: %v", err)
+			}
+			opts.MaxOutput = 1024
+			if _, err := Convert(t.Context(), image, filepath.Join(dir, "out.gdi"), opts); err == nil || !strings.Contains(err.Error(), "size limit") {
+				t.Fatalf("GD-ROM over its expansion budget: %v", err)
+			}
+			if entries, err := os.ReadDir(dir); err != nil || len(entries) != 1 {
+				t.Fatalf("preflight left extra files: %v, %v", entries, err)
+			}
+		})
+	}
+}
+
+func TestPlanCHDPlaylistCombinedBytes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		data []byte
+		raw  int64
+	}{
+		{"cd", testfixture.CDTrackHeader("TRACK:1 TYPE:AUDIO SUBTYPE:NONE FRAMES:4 PREGAP:0 PGTYPE:MODE1 PGSUB:NONE POSTGAP:0"), 4 * 2352},
+		{"dvd", testfixture.CHDMetadata(5, "DVD "), 2048},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, name := range []string{"one.chd", "two.chd"} {
+				if err := os.WriteFile(filepath.Join(dir, name), tc.data, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			list := filepath.Join(dir, "set.m3u")
+			if err := os.WriteFile(list, []byte("one.chd\ntwo.chd\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			for _, limit := range []int64{2*tc.raw - 1, 3 * tc.raw} {
+				plan, err := PlanConversions(context.Background(), list, Options{MaxOutput: limit})
+				if err != nil || planHas(plan, Raw, "") != (limit >= 2*tc.raw) {
+					t.Fatalf("limit %d: %+v, %v", limit, plan.Targets, err)
+				}
+			}
+		})
+	}
+}
+
+func TestPlanCHDHDDRequiresRestorableGeometry(t *testing.T) {
+	for _, version := range []uint32{4, 5} {
+		source := filepath.Join(t.TempDir(), "disk.chd")
+		if err := os.WriteFile(source, testfixture.CHDMetadata(version, "GDDD"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		plan, err := PlanConversions(context.Background(), source, Options{})
+		if err != nil || planHas(plan, Raw, "hdd") {
+			t.Fatalf("offered unusable v%d HDD restoration: %+v, %v", version, plan.Targets, err)
+		}
+	}
+}
+
+func TestPlanZ3DSMetadata(t *testing.T) {
+	for _, size := range []int{5, 6, 16} {
+		metadata := make([]byte, size)
+		metadata[0] = 1
+		source := filepath.Join(t.TempDir(), "game.z3dsx")
+		data := testfixture.Z3DSWithFrame("3DSX", testfixture.Z3DS("3DSX")[32:43], metadata)
+		if err := os.WriteFile(source, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		plan, err := PlanConversions(context.Background(), source, Options{})
+		if err != nil || planHas(plan, Raw, "") != (size != 6) {
+			t.Errorf("metadata size %d: %+v, %v", size, plan.Targets, err)
+		}
+	}
+}
+
+func TestMultisessionCUERefusedBeforePublication(t *testing.T) {
+	dir := t.TempDir()
+	cue, output := filepath.Join(dir, "disc.cue"), filepath.Join(dir, "disc.chd")
+	sources := map[string][]byte{
+		cue:                             []byte("REM SESSION 01\nFILE track.bin BINARY\nTRACK 01 MODE1/2048\nINDEX 01 00:00:00\nREM LEAD-OUT 00:01:00\nREM SESSION 02\nTRACK 02 MODE1/2048\nINDEX 01 00:01:25\n"),
+		filepath.Join(dir, "track.bin"): bytes.Repeat([]byte{0x55}, 256*2048),
+	}
+	for path, contents := range sources {
+		if err := os.WriteFile(path, contents, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx := context.Background()
+	opts := Options{Format: CHD, Tools: map[string]string{"chdman": filepath.Join(dir, "missing")}}
+	plan, err := PlanConversions(ctx, cue, opts)
+	if err != nil || planHas(plan, CHD, "cd") {
+		t.Fatalf("offered multisession CUE: %+v, %v", plan.Targets, err)
+	}
+	if _, err := Convert(ctx, cue, output, opts); err == nil || !strings.Contains(err.Error(), "session") {
+		t.Fatalf("conversion returned %v", err)
+	}
+	if _, err := os.Lstat(output); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unexpected output: %v", err)
+	}
+	for path, want := range sources {
+		got, err := os.ReadFile(path)
+		if err != nil || !bytes.Equal(want, got) {
+			t.Fatalf("source changed: %s, %v", path, err)
+		}
 	}
 }
 
@@ -313,6 +646,16 @@ func TestPlanConversionsPlaylistBoundsKnownAggregateBytes(t *testing.T) {
 	plan, err = PlanConversions(context.Background(), source, Options{MaxOutput: 3 << 10})
 	if err != nil || planHas(plan, Raw, "") {
 		t.Fatalf("offered known native expansion over aggregate limit: %+v %v", plan, err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "second.rvz"), testfixture.RVZHeader(2048), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("first.iso\nsecond.rvz\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	plan, err = PlanConversions(context.Background(), source, Options{MaxOutput: 3 << 10})
+	if err != nil || planHas(plan, Raw, "") {
+		t.Fatalf("offered known Dolphin expansion over aggregate limit: %+v %v", plan, err)
 	}
 }
 

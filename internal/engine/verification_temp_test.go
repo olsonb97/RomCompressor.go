@@ -205,7 +205,7 @@ func TestStandaloneVerificationUsesSelectedScratchParent(t *testing.T) {
 
 func verificationTempFixture(t *testing.T, directory, engine string) (string, string, []byte) {
 	t.Helper()
-	format, extension, data := kind.RVZ, ".rvz", []byte{'R', 'V', 'Z', 1}
+	format, extension, data := kind.RVZ, ".rvz", testfixture.RVZHeader(2048)
 	switch engine {
 	case "azahar":
 		payload := bytes.Repeat([]byte{0x5a}, 1024)

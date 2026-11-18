@@ -40,7 +40,7 @@ func convertDolphin(ctx context.Context, source, output string, input string, op
 		return err
 	}
 	defer os.RemoveAll(userDir)
-	before, err := dolphinDiscHash(ctx, tool, source, userDir, input)
+	before, err := dolphinDiscHash(ctx, tool, source, userDir, input, opts.MaxOutput)
 	if err != nil {
 		return err
 	}
@@ -76,7 +76,7 @@ func convertDolphin(ctx context.Context, source, output string, input string, op
 			return err
 		}
 	}
-	after, err := dolphinDiscHash(ctx, tool, output, userDir, opts.Format)
+	after, err := dolphinDiscHash(ctx, tool, output, userDir, opts.Format, opts.MaxOutput)
 	if err != nil {
 		return err
 	}
@@ -100,8 +100,38 @@ func checkDolphinISO(path string) error {
 	return nil
 }
 
-func dolphinDiscHash(ctx context.Context, tool, path, userDir string, format string) ([sha1.Size]byte, error) {
+// DolphinDiscSize reads the logical ISO size from Dolphin's GCZ blob header
+// or the shared first WIA/RVZ header before an engine starts reading the disc.
+func DolphinDiscSize(path, format string, limit int64) (int64, error) {
+	file, _, err := fileops.OpenRegular(path)
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+	var order binary.ByteOrder = binary.BigEndian
+	var offset int64 = 36
+	if format == kind.GCZ {
+		order, offset = binary.LittleEndian, 16
+	}
+	var field [8]byte
+	if _, err := file.ReadAt(field[:], offset); err != nil {
+		return 0, fmt.Errorf("read %s disc size: %w", format, err)
+	}
+	size := order.Uint64(field[:])
+	if limit == 0 {
+		limit = kind.DefaultMaxOutput
+	}
+	if size == 0 || size > uint64(limit) {
+		return 0, fmt.Errorf("%s disc has invalid size or exceeds the expanded size limit", format)
+	}
+	return int64(size), nil
+}
+
+func dolphinDiscHash(ctx context.Context, tool, path, userDir string, format string, limit int64) ([sha1.Size]byte, error) {
 	if format != kind.Raw {
+		if _, err := DolphinDiscSize(path, format, limit); err != nil {
+			return [sha1.Size]byte{}, err
+		}
 		return dolphinHash(ctx, tool, path, userDir)
 	}
 	var result [sha1.Size]byte

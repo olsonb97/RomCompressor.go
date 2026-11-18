@@ -173,7 +173,10 @@ func TestSevenZipSelectionIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	dir := t.TempDir()
-	first, second := filepath.Join(dir, "first.bin"), filepath.Join(dir, "second.bin")
+	first, second := filepath.Join(dir, "first.bin"), filepath.Join(dir, "nested", "second.bin")
+	if err := os.Mkdir(filepath.Dir(second), 0700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(first, []byte("first file"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +184,7 @@ func TestSevenZipSelectionIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	archive := filepath.Join(dir, "multiple.7z")
-	if _, err := process.Run(ctx, tool, "a", "-t7z", "-bd", "-y", archive, "--", first, second); err != nil {
+	if _, err := process.Execute(ctx, nil, nil, dir, tool, "a", "-t7z", "-bd", "-y", archive, "--", "first.bin", "nested/second.bin"); err != nil {
 		t.Fatal(err)
 	}
 	output := filepath.Join(dir, "chosen.bin")
@@ -192,7 +195,7 @@ func TestSevenZipSelectionIntegration(t *testing.T) {
 	if _, err := os.Stat(output); !os.IsNotExist(err) {
 		t.Fatalf("failed operation published output: %v", err)
 	}
-	opts.Entry = "second.bin"
+	opts.Entry = "nested/second.bin"
 	opts.MaxOutput = 1
 	if _, err := romcompressor.Convert(ctx, archive, output, opts); err == nil {
 		t.Fatal("ignored output limit")
@@ -234,6 +237,17 @@ func TestDolphinRoundTripIntegration(t *testing.T) {
 			}
 			opts.Format = romcompressor.Raw
 			restored := compressed + ".iso"
+			limited := opts
+			limited.MaxOutput = int64(len(data)) - 1
+			if err := romcompressor.Verify(ctx, compressed, limited); err == nil {
+				t.Fatal("verified a disc over the expanded size limit")
+			}
+			if _, err := romcompressor.Convert(ctx, compressed, restored, limited); err == nil {
+				t.Fatal("restored a disc over the expanded size limit")
+			}
+			if err := romcompressor.Verify(ctx, compressed, opts); err != nil {
+				t.Fatal(err)
+			}
 			if _, err := romcompressor.Convert(ctx, compressed, restored, opts); err != nil {
 				t.Fatal(err)
 			}

@@ -6,10 +6,45 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/olsonb97/romcompressor.go/internal/testfixture"
 )
+
+func TestCDTrackTablePrecedence(t *testing.T) {
+	data := testfixture.CDTrackHeader("unused CHT2 fallback at track one")
+	last := 124
+	appendRecord := func(tag, value string) {
+		next := len(data)
+		binary.BigEndian.PutUint64(data[last+8:], uint64(next))
+		var header [16]byte
+		copy(header[:], tag)
+		binary.BigEndian.PutUint32(header[4:], uint32(len(value)+1))
+		data = append(data, header[:]...)
+		data = append(data, value...)
+		data = append(data, 0)
+		last = next
+	}
+	appendRecord("CHTR", "TRACK:1 TYPE:AUDIO SUBTYPE:NONE FRAMES:4")
+	appendRecord("CHGD", "unused GD-ROM fallback at track one")
+	path := filepath.Join(t.TempDir(), "mixed-metadata.chd")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	layout, err := cdExtractionLayout(t.Context(), path, testMaxOutput)
+	if err != nil || len(layout.tracks) != 1 || layout.tracks[0].mode != "AUDIO" {
+		t.Fatalf("expected the first CHTR record: %+v, %v", layout, err)
+	}
+	appendRecord("CHGD", "active GD-ROM track two")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cdExtractionLayout(t.Context(), path, testMaxOutput); err == nil {
+		t.Fatal("offered a single BIN for a disc with an active GD-ROM track")
+	}
+}
 
 func TestMediaReadsOnlyExplicitTagsAcrossCHDVersions(t *testing.T) {
 	for _, version := range []uint32{3, 4, 5} {

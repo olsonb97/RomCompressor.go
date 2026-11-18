@@ -42,7 +42,8 @@ func Inspect(ctx context.Context, path string) (FileInfo, error) {
 	if len(b) >= 0x104 {
 		magic := string(b[0x100:0x104])
 		nintendoCCI := ext == ".3ds" || ext == ".cci" && !bytes.HasPrefix(b, []byte("CCIM"))
-		if (nintendoCCI && magic == "NCSD") || (ext == ".xci" && magic == "HEAD") {
+		nintendoCXI := ext == ".cxi" || ext == ".app"
+		if (nintendoCCI && magic == "NCSD") || (nintendoCXI && magic == "NCCH") || (ext == ".xci" && magic == "HEAD") {
 			return FileInfo{Format: Raw, Size: st.Size()}, ctx.Err()
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -39,7 +40,7 @@ func TestCHDVerificationDiagnosticHelper(t *testing.T) {
 		return
 	}
 	_, _ = os.Stdout.WriteString("engine log begins\n" + strings.Repeat("x", 3<<20) + "\nNo verification to be done; CHD has no checksum\n")
-	os.Exit(0)
+	syscall.Exit(0) // Leave stdout identical to the simulated chdman output.
 }
 
 func TestCHDVerificationFailureDiagnosticsAreBounded(t *testing.T) {

@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/olsonb97/romcompressor.go/internal/fileops"
 )
@@ -19,6 +20,14 @@ const MaxDescriptorSize = 4 << 20
 
 var cueFile = regexp.MustCompile(`(?i)^\s*FILE\s+(?:"([^"]+)"|([^\s]+))\s+\S+\s*$`)
 var gdiTrack = regexp.MustCompile(`^\s*\d+\s+\d+\s+\d+\s+\d+\s+(?:"([^"]+)"|([^\s]+))\s+\d+\s*$`)
+
+// BinaryCUEFile returns a FILE directive for a sibling BIN in a restored CUE.
+func BinaryCUEFile(name string) (string, error) {
+	if name == "" || !utf8.ValidString(name) || strings.ContainsAny(name, "\"/\\:\r\n\x00") || len(name)+len("FILE \"\" BINARY\n") > 510 {
+		return "", fmt.Errorf("BIN filename cannot be represented safely in a CUE sheet")
+	}
+	return fmt.Sprintf("FILE \"%s\" BINARY\n", name), nil
+}
 
 // ValidateReferences checks descriptor paths before an external engine follows them.
 // Disc sets must be self-contained under the chosen descriptor's folder.

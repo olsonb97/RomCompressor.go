@@ -3,7 +3,11 @@ package engine
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -102,6 +106,61 @@ func TestThreeDSValidatesFrameAndMetadataExtents(t *testing.T) {
 				t.Fatalf("read3DSHeader = %v; want error containing %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestAzahar2126Metadata(t *testing.T) {
+	// Official 2126.2 Windows output from a generated 4 KiB 3DSX.
+	const fixture = "WjNEUzNEU1gBACAAYAAAADEAAAAAAAAAABAAAAAAAAABAQQUAGRhdGUyMDI2LTExLTE3VDA3OjIxOjE3WgEMBgBtYXhmcmFtZXNpemUyNjIxNDQBCg0AY29tcHJlc3NvckF6YWhhciAyMTI2LjIAAAAAAAAAAAAAAAAAAAAAAAAotS/9AEB9AABAM0RTWCAACAABAPX3ARdeKk0YEQAAABgAAAAAEAAAAQAAAACx6pKP"
+	data, err := base64.StdEncoding.DecodeString(fixture)
+	if err != nil || fmt.Sprintf("%x", sha256.Sum256(data)) != "8a647397e931d4c3742570051b01d511f96a410aa80a7cd9245a52d1a820a8f0" {
+		t.Fatal("bad regression fixture")
+	}
+	path := filepath.Join(t.TempDir(), "review.z3dsx")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	h, err := read3DSHeader(context.Background(), path, 4096)
+	if err != nil || h.expanded != 4096 || h.format != kind.Z3DSX {
+		t.Fatalf("official container: %+v, %v", h, err)
+	}
+}
+
+func TestThreeDSMetadataAlignment(t *testing.T) {
+	validate := func(ctx context.Context, b []byte) error {
+		return validate3DSMetadata(ctx, io.NewSectionReader(bytes.NewReader(b), 0, int64(len(b))))
+	}
+	ctx := context.Background()
+	for n := 0; n < 16; n++ {
+		data := append([]byte{1, 1, 1, byte(n), 0, 'x'}, bytes.Repeat([]byte{'v'}, n)...)
+		data = append(data, 0, 0, 0, 0)
+		if err := validate(ctx, data); err != nil {
+			t.Fatalf("unpadded length %d: %v", len(data), err)
+		}
+		pad := (16 - len(data)%16) % 16
+		padded := append(bytes.Clone(data), make([]byte, pad)...)
+		if err := validate(ctx, padded); err != nil {
+			t.Fatalf("padding %d: %v", pad, err)
+		}
+		if err := validate(ctx, append(bytes.Clone(padded), make([]byte, 16)...)); err == nil {
+			t.Fatal("accepted excess padding")
+		}
+		if pad > 0 {
+			padded[len(padded)-1] = 1
+			if err := validate(ctx, padded); err == nil {
+				t.Fatal("accepted nonzero padding")
+			}
+		}
+	}
+	for _, bad := range [][]byte{{1, 0, 0, 0, 0, 0}, {1, 0, 1, 0, 0, 'x'}, {1, 1, 0, 1, 0}, {1, 0, 0, 0}} {
+		if err := validate(ctx, bad); err == nil {
+			t.Fatalf("accepted malformed metadata %x", bad)
+		}
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := validate(canceled, []byte{1, 0, 0, 0, 0}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled metadata check: %v", err)
 	}
 }
 

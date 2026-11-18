@@ -52,6 +52,12 @@ Conversion staging remains beside its destination for exclusive publication.
 `Inspect` reports signature-based type and ZIP entries. `Batch` invokes the same conversion
 path sequentially and returns a result for each attempted job.
 
+Dreamcast restoration reads the GD-ROM track table and gives chdman private,
+fixed output names. The adapter builds the public GDI from that table and
+checks the normalized track data against the CHD raw SHA-1. The file workflow
+publishes the verified tracks before their descriptor. Playlist restoration
+reserves all track names before choosing the next disc's name.
+
 CHD inspection shares the bounded metadata parser used before engine verification.
 It reports explicit media tags, rejects conflicting tags and malformed chains,
 and leaves untagged raw media unidentified. Extraction retains its explicit media

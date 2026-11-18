@@ -127,6 +127,8 @@ func TestInspectRecognizesCartridgeBeforeEmbeddedSignaturePrefix(t *testing.T) {
 	}{
 		{".3ds", "NCSD"},
 		{".cci", "NCSD"},
+		{".cxi", "NCCH"},
+		{".APP", "NCCH"},
 		{".xci", "HEAD"},
 	} {
 		path := filepath.Join(t.TempDir(), "game"+tt.ext)

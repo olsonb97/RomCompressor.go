@@ -16,9 +16,9 @@ import (
 const maxSBISize = 1 << 20
 
 type discSidecar struct {
-	path   string
-	info   os.FileInfo
-	shared bool
+	path       string
+	info       os.FileInfo
+	sharedPath string
 }
 
 func discSidecarSupported(path string) bool {
@@ -50,7 +50,7 @@ func findDiscSidecar(source, output string) (*discSidecar, error) {
 		}
 		// Converting beside the original can share its unchanged SBI. The
 		// existing source is never staged, republished, or included in rollback.
-		sidecar.shared = true
+		sidecar.sharedPath = existing.path
 	}
 	return sidecar, nil
 }
@@ -82,10 +82,10 @@ func findSBI(disc string) (*discSidecar, error) {
 }
 
 func (s *discSidecar) stage(ctx context.Context, output string, limit int64) (string, error) {
-	if s == nil || s.shared {
+	if s == nil {
 		return "", nil
 	}
-	if s.info.Size() > limit {
+	if s.sharedPath == "" && s.info.Size() > limit {
 		return "", fmt.Errorf("SBI companion exceeds output limit")
 	}
 	src, info, err := fileops.OpenRegular(s.path)
@@ -102,6 +102,16 @@ func (s *discSidecar) stage(ctx context.Context, output string, limit int64) (st
 	}
 	if int64(len(data)) != s.info.Size() || !bytes.HasPrefix(data, []byte{'S', 'B', 'I', 0}) {
 		return "", fmt.Errorf("SBI companion is invalid or changed during conversion")
+	}
+	if s.sharedPath != "" {
+		current, err := os.Lstat(s.sharedPath)
+		if err != nil {
+			return "", err
+		}
+		if !current.Mode().IsRegular() || !fileops.SameSnapshot(s.info, current) {
+			return "", fmt.Errorf("shared SBI companion changed during conversion")
+		}
+		return "", ctx.Err()
 	}
 	path := strings.TrimSuffix(output, filepath.Ext(output)) + ".sbi"
 	dst, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)

@@ -22,10 +22,7 @@ func Preflight(ctx context.Context, source, input string, opts Config) error {
 	ext := strings.ToLower(filepath.Ext(source))
 	switch {
 	case opts.Format == kind.SevenZip:
-		if strings.HasPrefix(filepath.Base(source), "@") {
-			return fmt.Errorf("7z input filename cannot begin with @")
-		}
-		return nil
+		return validate7zName(filepath.Base(source))
 	case kind.ThreeDS(opts.Format) || kind.ThreeDS(input):
 		if input == kind.Raw && kind.ThreeDS(opts.Format) {
 			if ext != kind.ThreeDSRawExtension(opts.Format) && !(opts.Format == kind.ZCCI && ext == ".3ds") && !(opts.Format == kind.ZCXI && ext == ".app") {
@@ -52,18 +49,8 @@ func Preflight(ctx context.Context, source, input string, opts Config) error {
 				return err
 			}
 			defer file.Close()
-			var header [32]byte
-			if _, err = file.ReadAt(header[:], 0); err != nil {
-				return err
-			}
-			h, err := parse3DSHeader(header[:], info.Size())
-			if err != nil {
-				return err
-			}
-			if h.expanded > uint64(opts.MaxOutput) {
-				return fmt.Errorf("Z3DS expanded size exceeds the output limit")
-			}
-			return nil
+			_, err = read3DSMetadata(ctx, file, info.Size(), opts.MaxOutput)
+			return err
 		}
 	case opts.Format == kind.WUX || input == kind.WUX:
 		if input == kind.Raw && opts.Format == kind.WUX && ext == ".wud" || input == kind.WUX && opts.Format == kind.Raw {
@@ -101,10 +88,7 @@ func Preflight(ctx context.Context, source, input string, opts Config) error {
 		}
 	case opts.Format == kind.CHD || input == kind.CHD:
 		if input == kind.CHD && opts.Format == kind.Raw {
-			if opts.Media != "cd" && opts.Media != "dvd" && opts.Media != "hdd" {
-				return fmt.Errorf("CHD extraction requires media cd, dvd, or hdd")
-			}
-			_, err := chd.MetadataFile(source, opts.MaxOutput, opts.Media)
+			_, err := chd.RestoredSize(ctx, source, opts.MaxOutput, opts.Media)
 			return err
 		}
 		if input == kind.Raw && opts.Format == kind.CHD {
@@ -115,28 +99,31 @@ func Preflight(ctx context.Context, source, input string, opts Config) error {
 			if input == kind.Raw {
 				return checkDolphinISO(source)
 			}
-			return nil
+			_, err := DolphinDiscSize(source, input, opts.MaxOutput)
+			return err
 		}
 	case opts.Format == kind.NSZ || opts.Format == kind.XCZ || input == kind.NSZ || input == kind.XCZ:
-		if (input == kind.NSZ || input == kind.XCZ) && opts.Format == kind.Raw {
+		if input == kind.XCZ && opts.Format == kind.Raw || input == kind.Raw && opts.Format == kind.XCZ && ext == ".xci" {
+			return checkSwitchCardHeader(source, input == kind.Raw, opts.MaxOutput)
+		}
+		if input == kind.NSZ && opts.Format == kind.Raw {
 			return nil
 		}
-		if input == kind.Raw && (opts.Format == kind.NSZ && ext == ".nsp" || opts.Format == kind.XCZ && ext == ".xci") {
-			file, _, err := fileops.OpenRegular(source)
+		if input == kind.Raw && opts.Format == kind.NSZ && ext == ".nsp" {
+			file, info, err := fileops.OpenRegular(source)
 			if err != nil {
 				return err
 			}
 			defer file.Close()
-			var magic [4]byte
-			offset, want := int64(0), "PFS0"
-			if opts.Format == kind.XCZ {
-				offset, want = 0x100, "HEAD"
+			if info.Size() > opts.MaxOutput {
+				return fmt.Errorf("Switch source exceeds the expanded size limit")
 			}
-			if _, err := file.ReadAt(magic[:], offset); err != nil {
+			var magic [4]byte
+			if _, err := file.ReadAt(magic[:], 0); err != nil {
 				return err
 			}
-			if string(magic[:]) != want {
-				return fmt.Errorf("Switch input lacks its %s signature", want)
+			if string(magic[:]) != "PFS0" {
+				return fmt.Errorf("Switch input lacks its PFS0 signature")
 			}
 			return nil
 		}
@@ -153,17 +140,7 @@ func preflightCHD(ctx context.Context, source, ext string, opts Config) error {
 	}
 	switch media {
 	case "cd":
-		switch ext {
-		case ".cue":
-			return chd.ValidateCUE(source, "", opts.MaxOutput)
-		case ".gdi":
-			return chd.ValidateGDI(source, opts.MaxOutput)
-		case ".nrg":
-			return chd.ValidateNRG(ctx, source, opts.MaxOutput)
-		case ".iso", ".cdr", ".toast":
-			return nil
-		}
-		return fmt.Errorf("CD CHD input must be a CUE/GDI descriptor or an ISO, CDR, Toast, or NRG image")
+		return chd.ValidateCDSource(ctx, source, opts.MaxOutput)
 	case "dvd", "hdd":
 		if media == "dvd" && ext != ".iso" || media == "hdd" && !chd.IsHardDiskExtension(ext) {
 			break

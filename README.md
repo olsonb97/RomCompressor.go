@@ -40,9 +40,8 @@ Trimming is a separate operation for validated DS/DSi cartridges, 3DS CARD1
 cartridges, and standard Switch XCI gamecards. It always writes a new copy.
 
 Support is limited to the layouts documented in [format details](docs/formats.md).
-Emulator compatibility varies by version and platform. NSZ/XCZ encrypted-game
-runtime verification remains incomplete; generated fixtures and format round trips
-do not establish emulator gameplay compatibility.
+Emulator compatibility varies by version and platform. Switch conversions require
+an exact round trip. NSZ cannot retain every XCI layout or gamecard certificate.
 
 ## Installation
 
@@ -157,6 +156,8 @@ Flags work before or after filenames. Quote paths containing spaces.
 romcompressor compress game.iso -f cso
 romcompressor decompress game.cso -o restored.iso
 romcompressor compress game.cue -f chd
+romcompressor decompress game.chd --media cd -o restored.cue
+romcompressor decompress dreamcast.chd --media cd -o restored.gdi
 romcompressor compress game.iso -f chd --media dvd
 romcompressor compress game.iso -f rvz --tool dolphin-tool=/path/to/DolphinTool
 romcompressor inspect games.zip --json
@@ -209,7 +210,8 @@ M3U conversion creates a new companion folder and publishes its playlist after
 every disc succeeds, preserving disc order and matching PlayStation SBI companions.
 The example above uses CUE/BIN discs; add `--media dvd` for a playlist of DVD ISOs.
 Decompression restores supported disc containers into a new set, including CUE/BIN
-companions for CD CHD and PBP. The default playlist is `NAME-restored.m3u`.
+companions for CD CHD and PBP. Supported Dreamcast GD-ROM CHDs restore to a
+GDI descriptor and one BIN per track. The default playlist is `NAME-restored.m3u`.
 Tagged CHD CD/DVD media is selected per disc. Unidentified CHDs need an explicit
 supported media choice; CD extraction requires track metadata. Already-raw
 single-image entries are copied and checked. Raw CUE/GDI entries and HDD/laserdisc

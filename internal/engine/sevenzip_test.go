@@ -2,10 +2,19 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	kind "github.com/olsonb97/romcompressor.go/internal/format"
 )
+
+func TestSevenZipCreationRequiresSelectableFilename(t *testing.T) {
+	for _, name := range []string{"@list", "two\nlines.bin", "invalid\xff.bin", "tab\tname.bin"} {
+		if err := Preflight(context.Background(), name, kind.Raw, Config{Format: kind.SevenZip}); err == nil {
+			t.Errorf("offered 7z creation for unselectable name %q", name)
+		}
+	}
+}
 
 func TestParse7zEntries(t *testing.T) {
 	listing := "Path = directory\r\nSize = 0\r\nAttributes = RHD_ drwxr-xr-x\r\n\r\nPath = directory/game name.gba\r\nSize = 1024\r\nAttributes = A_ -rw-r--r--\r\n\r\nPath = empty.bin\r\nSize = 0\r\nFolder = -\r\n"

@@ -21,7 +21,7 @@ import (
 const defaultMaxOutput int64 = kind.DefaultMaxOutput
 
 // Convert stages, verifies, and exclusively publishes output. Existing files are
-// never replaced. CD extraction publishes BIN companions before its CUE entry point.
+// never replaced. Disc extraction publishes tracks before the CUE or GDI.
 func Convert(ctx context.Context, source, output string, opts Options) (Result, error) {
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
@@ -135,7 +135,7 @@ func convertFile(ctx context.Context, source, output string, opts Options, playl
 		if wbfs.size != info.Size {
 			return Result{}, fmt.Errorf("WBFS source changed during inspection")
 		}
-		if len(wbfs.parts) > 1 && opts.Format != Raw && !dolphinFormat(opts.Format) {
+		if !wbfs.supportsOutput(opts.Format) {
 			return Result{}, fmt.Errorf("split WBFS conversion requires ISO, RVZ, WIA, or GCZ output")
 		}
 		inputs = make(map[string]os.FileInfo, len(wbfs.parts))
@@ -151,6 +151,17 @@ func convertFile(ctx context.Context, source, output string, opts Options, playl
 	}
 	if err := preflightSource(ctx, source, info, opts); err != nil {
 		return Result{}, err
+	}
+	splitTracks := 0
+	if info.Format == CHD && opts.Format == Raw && opts.Media == "cd" {
+		var ext string
+		ext, splitTracks, err = chd.CDOutput(ctx, source, opts.MaxOutput)
+		if err != nil {
+			return Result{}, err
+		}
+		if !strings.EqualFold(filepath.Ext(output), ext) {
+			return Result{}, fmt.Errorf("this CHD requires a %s output descriptor", ext)
+		}
 	}
 	var sidecar *discSidecar
 	if opts.Media != "hdd" {
@@ -179,7 +190,13 @@ func convertFile(ctx context.Context, source, output string, opts Options, playl
 	defer stage.Cleanup()
 	staged := filepath.Join(stage.Path(), filepath.Base(output))
 	notify := progressReporter(opts.Progress)
-	notify("converting", 0, info.Size)
+	restoreNative := opts.Format == Raw && native(info.Format)
+	conversionBytes := info.Size
+	if restoreNative {
+		// Native decoders report expanded bytes once they read the container.
+		conversionBytes = 0
+	}
+	notify("converting", 0, conversionBytes)
 	if err := stage.Check(); err != nil {
 		return Result{}, err
 	}
@@ -188,7 +205,7 @@ func convertFile(ctx context.Context, source, output string, opts Options, playl
 	}
 	wuxOverride := (opts.Format == WUX || opts.Format == Raw && info.Format == WUX) &&
 		opts.Tools["jwudtool"] != ""
-	if !wuxOverride && (native(opts.Format) || opts.Format == Raw && native(info.Format)) {
+	if !wuxOverride && (native(opts.Format) || restoreNative) {
 		err = convertNative(ctx, source, staged, info, opts, wbfs, notify)
 	} else {
 		err = fileops.RunMonitored(ctx, stage.Path(), opts.MaxOutput, func(ctx context.Context) error {
@@ -205,7 +222,12 @@ func convertFile(ctx context.Context, source, output string, opts Options, playl
 		return Result{}, err
 	}
 	var companions []string
-	if opts.Format == Raw && (info.Format == PBP || info.Format == CHD && opts.Media == "cd") {
+	if splitTracks > 0 {
+		stem := strings.TrimSuffix(filepath.Base(staged), filepath.Ext(staged))
+		for n := 1; n <= splitTracks; n++ {
+			companions = append(companions, filepath.Join(stage.Path(), chd.GDTrackStem(stem, n)+".bin"))
+		}
+	} else if opts.Format == Raw && (info.Format == PBP || info.Format == CHD && opts.Media == "cd") {
 		companions = append(companions, strings.TrimSuffix(staged, filepath.Ext(staged))+".bin")
 	}
 	if sidecar != nil {
@@ -273,8 +295,8 @@ func validateOutputExtension(input Format, output string, opts Options) error {
 			if opts.Media != "cd" && opts.Media != "dvd" && opts.Media != "hdd" {
 				return fmt.Errorf("CHD extraction requires media cd, dvd, or hdd")
 			}
-			if opts.Media == "cd" && ext != ".cue" || opts.Media == "dvd" && ext != ".iso" {
-				return fmt.Errorf("CHD CD extraction needs .cue; DVD extraction needs .iso")
+			if opts.Media == "cd" && ext != ".cue" && ext != ".gdi" || opts.Media == "dvd" && ext != ".iso" {
+				return fmt.Errorf("CHD extraction requires .cue for CD, .gdi for GD-ROM, or .iso for DVD")
 			}
 			if opts.Media == "hdd" && !chd.IsHardDiskExtension(ext) {
 				return fmt.Errorf("hard-drive CHD extraction needs .img, .raw, .hdd, or .bin")
@@ -321,7 +343,11 @@ func convertNative(ctx context.Context, source, output string, info FileInfo, op
 	if err != nil {
 		return err
 	}
-	notify("verifying", 0, info.Size)
+	verifyBytes := info.Size
+	if opts.Format == Raw {
+		verifyBytes = st.Size()
+	}
+	notify("verifying", 0, verifyBytes)
 	notify("publishing", 0, 0)
 	options.Progress = nil
 	if opts.Format == Raw {
@@ -461,7 +487,7 @@ func verifyNative(ctx context.Context, path string, info FileInfo, before os.Fil
 func progressReporter(fn func(Progress)) func(string, int64, int64) {
 	var notify func(string, int64, int64)
 	if fn != nil {
-		notify = func(phase string, bytes, total int64) { fn(Progress{Phase: phase, Bytes: bytes, Total: total}) }
+		notify = func(phase string, bytes, total int64) { fn(Progress{Phase: phase, Bytes: bytes, Total: max(total, 0)}) }
 	}
 	return progress.Reporter(notify)
 }

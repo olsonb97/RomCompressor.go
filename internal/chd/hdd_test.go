@@ -38,7 +38,7 @@ func TestHDDCHDRejectsInvalidMetadata(t *testing.T) {
 			binary.BigEndian.PutUint32(record[4:8], uint32(tc.flags)<<24|uint32(len(tc.payload)))
 			binary.BigEndian.PutUint64(record[8:16], tc.next)
 			copy(record[16:], tc.payload)
-			err := checkHDDMetadata(bytes.NewReader(data), uint64(len(data)), chdV5HeaderSize, disk)
+			err := checkHDDMetadata(context.Background(), bytes.NewReader(data), uint64(len(data)), chdV5HeaderSize, disk)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("metadata validation = %v, want error %v", err, tc.wantErr)
 			}

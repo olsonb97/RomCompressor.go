@@ -34,6 +34,9 @@ func TestWUXRejectsIncompleteAndUnsafeImages(t *testing.T) {
 	if err := ValidateWUXSource(ctx, file, kind.Raw, Config{}); err == nil {
 		t.Fatal("accepted incomplete WUD")
 	}
+	if err := ValidateWUXSource(ctx, file, kind.Raw, Config{MaxOutput: 1 << 20}); err == nil || !strings.Contains(err.Error(), "expanded size limit") {
+		t.Fatalf("JWUDTool compression ignored the expanded size limit: %v", err)
+	}
 	binary.LittleEndian.PutUint32(data[32:36], 1)
 	if err := os.WriteFile(file, data, 0600); err != nil {
 		t.Fatal(err)

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/olsonb97/romcompressor.go/internal/chd"
 	"github.com/olsonb97/romcompressor.go/internal/disc"
 	"github.com/olsonb97/romcompressor.go/internal/fileops"
 )
@@ -137,11 +138,12 @@ func ConvertPlaylist(ctx context.Context, source, output string, opts Options) (
 		name := ""
 		if opts.Format == Raw {
 			var extension string
-			options, extension, err = playlistRestoreOptions(disc, info, options)
+			var splitTracks int
+			options, extension, splitTracks, err = playlistRestoreOptions(ctx, disc, info, options)
 			if err != nil {
 				return Result{}, fmt.Errorf("disc %d: %w", index+1, err)
 			}
-			name = playlistRestoredDiscName(disc, info.Format, extension, names)
+			name = playlistRestoredDiscName(disc, info.Format, extension, splitTracks, names)
 		} else {
 			name = playlistDiscName(disc, opts.Format, names)
 		}
@@ -299,71 +301,88 @@ func playlistDiscName(source string, format Format, used map[string]bool) string
 }
 
 // Playlist restoration keeps each logical disc in the flat companion folder.
-// Only formats whose complete output is a single image or CUE/BIN pair fit here.
-func playlistRestoreOptions(source string, info FileInfo, opts Options) (Options, string, error) {
+func playlistRestoreOptions(ctx context.Context, source string, info FileInfo, opts Options) (Options, string, int, error) {
 	opts.Format = Raw
 	if info.Format == CHD {
 		if info.Media != "" && info.Media != "cd" && info.Media != "dvd" {
-			return Options{}, "", fmt.Errorf("CHD %s media is not supported in a disc playlist", info.Media)
+			return Options{}, "", 0, fmt.Errorf("CHD %s media is not supported in a disc playlist", info.Media)
 		}
 		if opts.Media == "" {
 			opts.Media = info.Media
 		}
 		if opts.Media != "cd" && opts.Media != "dvd" {
-			return Options{}, "", fmt.Errorf("untagged CHD playlist restoration requires media cd or dvd")
+			return Options{}, "", 0, fmt.Errorf("untagged CHD playlist restoration requires media cd or dvd")
 		}
 		if info.Media != "" && info.Media != opts.Media {
-			return Options{}, "", fmt.Errorf("CHD %s metadata conflicts with requested %s media", info.Media, opts.Media)
+			return Options{}, "", 0, fmt.Errorf("CHD %s metadata conflicts with requested %s media", info.Media, opts.Media)
 		}
 		if opts.Media == "cd" {
-			return opts, ".cue", nil
+			ext, count, err := chd.CDOutput(ctx, source, opts.MaxOutput)
+			return opts, ext, count, err
 		}
-		return opts, ".iso", nil
+		return opts, ".iso", 0, nil
 	}
 	// A set may mix CHD with other image formats. A global CHD media choice
 	// must not become an ignored or invalid option for those other discs.
 	opts.Media = ""
 	switch info.Format {
 	case CSO, ZSO, RVZ, WIA, GCZ, WBFS, CISO, CCI:
-		return opts, ".iso", nil
+		return opts, ".iso", 0, nil
 	case PBP:
-		return opts, ".cue", nil
+		return opts, ".cue", 0, nil
 	case ECM:
 		extension := strings.ToLower(filepath.Ext(strings.TrimSuffix(source, filepath.Ext(source))))
 		switch extension {
 		case ".bin", ".img", ".iso", ".cdi", ".nrg":
-			return opts, extension, nil
+			return opts, extension, 0, nil
 		default:
-			return opts, ".bin", nil
+			return opts, ".bin", 0, nil
 		}
 	case Raw:
 		extension := strings.ToLower(filepath.Ext(source))
 		switch extension {
 		case ".cue", ".gdi":
-			return Options{}, "", fmt.Errorf("already-raw CUE/GDI playlist entries require their complete track sets and cannot be copied as one image")
+			return Options{}, "", 0, fmt.Errorf("already-raw CUE/GDI playlist entries require their complete track sets and cannot be copied as one image")
 		case ".iso", ".gcm", ".xiso", ".bin", ".img", ".cdr", ".toast", ".cdi", ".nrg":
-			return opts, extension, nil
+			return opts, extension, 0, nil
 		default:
-			return Options{}, "", fmt.Errorf("raw playlist entry must be a supported disc image")
+			return Options{}, "", 0, fmt.Errorf("raw playlist entry must be a supported disc image")
 		}
 	default:
-		return Options{}, "", fmt.Errorf("%s cannot be restored as a complete disc playlist entry", info.Format)
+		return Options{}, "", 0, fmt.Errorf("%s cannot be restored as a complete disc playlist entry", info.Format)
 	}
 }
 
-func playlistRestoredDiscName(source string, input Format, extension string, used map[string]bool) string {
+func playlistRestoredDiscName(source string, input Format, extension string, splitTracks int, used map[string]bool) string {
 	stem := strings.TrimSuffix(filepath.Base(source), filepath.Ext(source))
 	if input == ECM && strings.EqualFold(filepath.Ext(stem), extension) {
 		stem = strings.TrimSuffix(stem, filepath.Ext(stem))
 	}
-	selected := stem
-	for suffix := 2; used[strings.ToLower(selected)]; suffix++ {
-		selected = fmt.Sprintf("%s-%d", stem, suffix)
+	for suffix := 1; ; suffix++ {
+		selected := stem
+		if suffix > 1 {
+			selected = fmt.Sprintf("%s-%d", stem, suffix)
+		}
+		if used[strings.ToLower(selected)] {
+			continue
+		}
+		names := []string{strings.ToLower(selected)}
+		conflict := false
+		for n := 1; n <= splitTracks; n++ {
+			name := strings.ToLower(chd.GDTrackStem(selected, n))
+			if used[name] {
+				conflict = true
+				break
+			}
+			names = append(names, name)
+		}
+		if !conflict {
+			for _, name := range names {
+				used[name] = true
+			}
+			return selected + extension
+		}
 	}
-	// Reserve the complete stem because a CUE may also create BIN and SBI
-	// companions. Mixed output extensions must not collide with those names.
-	used[strings.ToLower(selected)] = true
-	return selected + extension
 }
 
 func copyPlaylistDisc(ctx context.Context, source, output string, opts Options, playlistInputs map[string]os.FileInfo) (Result, error) {

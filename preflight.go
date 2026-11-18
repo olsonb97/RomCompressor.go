@@ -43,6 +43,9 @@ func preflightSource(ctx context.Context, source string, info FileInfo, opts Opt
 	if opts.Keys != "" && !(opts.Format == NSZ || opts.Format == XCZ || opts.Format == Raw && (info.Format == NSZ || info.Format == XCZ)) {
 		return fmt.Errorf("keys are only used for Switch compression")
 	}
+	if (opts.Format == SevenZip || info.Format == Raw && dolphinFormat(opts.Format)) && info.Size > opts.MaxOutput {
+		return fmt.Errorf("%s input exceeds the expanded size limit", opts.Format)
+	}
 	if info.Format == WUA && opts.Format == Raw {
 		stat, err := fileops.SnapshotStat(source, os.Lstat)
 		if err != nil {

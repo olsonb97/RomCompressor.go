@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 type generatedNintendoISO struct {
@@ -174,8 +173,7 @@ func TestWBFSWiimmsInteroperability(t *testing.T) {
 	if err := wbfsFile.Close(); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
+	ctx := t.Context()
 	cmd := exec.CommandContext(ctx, tool, "ID6", "-T/", "game.wbfs")
 	cmd.Dir = dir
 	cmd.Env = append(cmd.Environ(), "WIT_OPT=")

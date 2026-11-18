@@ -2,6 +2,7 @@ package romcompressor
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"os"
 	"path/filepath"
@@ -59,8 +60,10 @@ func TestArchiveWrappingRejectsUnusedMediaAndKeys(t *testing.T) {
 }
 
 func TestCHDAndSwitchConversionsRetainRelevantOptionValidation(t *testing.T) {
-	xci := make([]byte, 512)
+	xci := make([]byte, 0xf004)
 	copy(xci[0x100:], "HEAD")
+	binary.LittleEndian.PutUint64(xci[0x130:], 0xf000)
+	copy(xci[0xf000:], "HFS0")
 	for _, tc := range []struct {
 		name   string
 		data   []byte
@@ -68,7 +71,7 @@ func TestCHDAndSwitchConversionsRetainRelevantOptionValidation(t *testing.T) {
 		opts   Options
 		engine string
 	}{
-		{"image.chd", testfixture.CHDMetadata(5, "CHT2"), "restored.cue", Options{Format: Raw, Media: "cd"}, "chdman"},
+		{"image.chd", testfixture.CDTrackHeader("TRACK:1 TYPE:MODE1 SUBTYPE:NONE FRAMES:4 PREGAP:0 PGTYPE:MODE1 PGSUB:NONE POSTGAP:0"), "restored.cue", Options{Format: Raw, Media: "cd"}, "chdman"},
 		{"image.iso", make([]byte, 2048), "packed.chd", Options{Format: CHD, Media: "dvd"}, "chdman"},
 		{"image.nsz", []byte("PFS0"), "restored.nsp", Options{Format: Raw}, "nsz"},
 		{"image.xcz", xci, "restored.xci", Options{Format: Raw}, "nsz"},
@@ -161,6 +164,16 @@ func TestDependencyErrorsAreActionableAcrossPublicOperations(t *testing.T) {
 			var dependency *DependencyError
 			if !errors.As(err, &dependency) || dependency.Engine != test.engine || !dependency.Configured {
 				t.Fatalf("dependency type/context lost: %#v, %v", dependency, err)
+			}
+			cause := dependency.Err
+			if cause == nil {
+				t.Fatal("missing executable lost its lookup error")
+			}
+			for errors.Unwrap(cause) != nil {
+				cause = errors.Unwrap(cause)
+			}
+			if !errors.Is(err, cause) {
+				t.Fatal("callers cannot match the underlying executable lookup error")
 			}
 			if !strings.Contains(err.Error(), "Options.Tools") || !strings.Contains(err.Error(), "--tool") {
 				t.Fatalf("dependency error does not guide library and CLI users: %v", err)

@@ -6,14 +6,71 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/olsonb97/romcompressor.go/internal/testfixture"
 )
+
+func TestTrimPaddingMatrix(t *testing.T) {
+	for _, sample := range []struct {
+		name, ext string
+		image     []byte
+		keep      int
+	}{
+		{"DS", ".nds", testfixture.NDS(false), testfixture.NDSTrimmedSize},
+		{"DSi", ".nds", testfixture.NDS(true), testfixture.DSiTrimmedSize},
+		{"CARD1", ".3ds", testfixture.CARD1(), testfixture.CARD1TrimmedSize},
+		{"CARD1-alias", ".cci", testfixture.CARD1(), testfixture.CARD1TrimmedSize},
+		{"XCI", ".xci", testXCI(false), testXCIEnd},
+		{"XCI-Terra", ".xci", testXCI(true), testXCIEnd},
+	} {
+		for _, pad := range []byte{0, 0xff} {
+			t.Run(fmt.Sprintf("%s/%02x", sample.name, pad), func(t *testing.T) {
+				dir := t.TempDir()
+				src := filepath.Join(dir, "source"+sample.ext)
+				data := bytes.Clone(sample.image)
+				for i := sample.keep; i < len(data); i++ {
+					data[i] = pad
+				}
+				if err := os.WriteFile(src, data, 0600); err != nil {
+					t.Fatal(err)
+				}
+				plan, err := PlanTrim(t.Context(), src)
+				if err != nil || plan.OutputBytes != int64(sample.keep) || plan.PaddingByte != pad {
+					t.Fatalf("plan = %+v, %v", plan, err)
+				}
+				out := filepath.Join(dir, "copy"+sample.ext)
+				done, err := Trim(t.Context(), src, out, TrimOptions{})
+				if err != nil || done.TrimPlan != plan {
+					t.Fatalf("trim = %+v, %v", done, err)
+				}
+				assertTrimBytes(t, out, data[:sample.keep])
+				if cli := os.Getenv("ROMCOMPRESSOR_MATRIX_CLI"); cli != "" {
+					var preview TrimPlan
+					raw, err := exec.CommandContext(t.Context(), cli, "trim", src, "--dry-run", "--json").Output()
+					if err != nil || json.Unmarshal(raw, &preview) != nil || preview != plan {
+						t.Fatalf("CLI preview = %s, %v", raw, err)
+					}
+					out = filepath.Join(dir, "cli"+sample.ext)
+					var result TrimResult
+					raw, err = exec.CommandContext(t.Context(), cli, "trim", src, "--json", "-o", out).Output()
+					if err != nil || json.Unmarshal(raw, &result) != nil || result.TrimPlan != plan || result.SHA256 != done.SHA256 {
+						t.Fatalf("CLI trim = %s, %v", raw, err)
+					}
+					assertTrimBytes(t, out, data[:sample.keep])
+				}
+				assertTrimBytes(t, src, data)
+			})
+		}
+	}
+}
 
 func TestTrimPlanAndCopyPreserveOriginal(t *testing.T) {
 	original := testfixture.CARD1()

@@ -141,6 +141,10 @@ func (input *wbfsInput) addToSnapshot(files map[string]os.FileInfo) {
 	}
 }
 
+func (input *wbfsInput) supportsOutput(format Format) bool {
+	return len(input.parts) == 1 || format == Raw || dolphinFormat(format)
+}
+
 func (input *wbfsInput) close() {
 	for _, part := range input.parts {
 		part.file.Close()

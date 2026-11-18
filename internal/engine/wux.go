@@ -150,6 +150,9 @@ func ValidateWUXSource(ctx context.Context, source string, input string, opts Co
 		return err
 	}
 	defer file.Close()
+	if opts.MaxOutput > 0 && opts.MaxOutput < codec.WUDImageBytes {
+		return fmt.Errorf("WUX image exceeds the expanded size limit")
+	}
 	if input == kind.Raw {
 		var magic [4]byte
 		if _, err := file.ReadAt(magic[:], 0); err != nil && err != io.EOF {
@@ -163,9 +166,6 @@ func ValidateWUXSource(ctx context.Context, source string, input string, opts Co
 			return fmt.Errorf("JWUDTool requires a complete 25,025,314,816-byte WUD image")
 		}
 		return nil
-	}
-	if opts.MaxOutput > 0 && opts.MaxOutput < codec.WUDImageBytes {
-		return fmt.Errorf("WUX image exceeds the output limit")
 	}
 	return codec.ValidateWUX(ctx, file, info.Size())
 }

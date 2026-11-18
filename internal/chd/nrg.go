@@ -53,7 +53,7 @@ func ValidateNRG(ctx context.Context, path string, limit int64) error {
 			if trackCount != 0 {
 				return fmt.Errorf("NRG contains multiple track tables")
 			}
-			trackCount, err = validateNRGTracks(io.NewSectionReader(file, at, length), dataEnd)
+			trackCount, err = validateNRGTracks(io.NewSectionReader(file, at, length), dataEnd, limit)
 			if err != nil {
 				return err
 			}
@@ -82,7 +82,7 @@ func ValidateNRG(ctx context.Context, path string, limit int64) error {
 	return fmt.Errorf("NRG metadata has too many chunks or lacks an end marker")
 }
 
-func validateNRGTracks(table *io.SectionReader, dataEnd uint64) (int, error) {
+func validateNRGTracks(table *io.SectionReader, dataEnd uint64, limit int64) (int, error) {
 	var header [22]byte
 	if _, err := io.ReadFull(table, header[:]); err != nil {
 		return 0, fmt.Errorf("read NRG track table: %w", err)
@@ -110,6 +110,9 @@ func validateNRGTracks(table *io.SectionReader, dataEnd uint64) (int, error) {
 		}
 		if index0 != next || index1 != index0 || end <= index1 || end > dataEnd || (end-index1)%sector != 0 {
 			return 0, fmt.Errorf("NRG tracks must have consecutive and complete sector extents")
+		}
+		if err := chargeCDTrack(&limit, int64((end-index1)/sector)); err != nil {
+			return 0, err
 		}
 		next = end
 	}

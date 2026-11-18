@@ -416,6 +416,9 @@ func TestPlaylistRestoreCHDMediaSelection(t *testing.T) {
 				tags = append(tags, test.tag)
 			}
 			image := testfixture.CHDMetadata(5, tags...)
+			if test.tag == "CHT2" && test.dependency {
+				image = testfixture.CDTrackHeader("TRACK:1 TYPE:AUDIO SUBTYPE:NONE FRAMES:4 PREGAP:0 PGTYPE:MODE1 PGSUB:NONE POSTGAP:0")
+			}
 			source := filepath.Join(directory, "source.m3u")
 			originals := map[string][]byte{source: []byte("disc.chd\n"), filepath.Join(directory, "disc.chd"): image}
 			for path, data := range originals {

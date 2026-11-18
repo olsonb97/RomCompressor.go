@@ -18,8 +18,8 @@ import (
 )
 
 func compress7z(ctx context.Context, source, output string, opts Config) error {
-	if strings.HasPrefix(filepath.Base(source), "@") {
-		return fmt.Errorf("7z cannot safely select a filename beginning with @")
+	if err := validate7zName(filepath.Base(source)); err != nil {
+		return err
 	}
 	tool, err := resolveTool(opts, "7z")
 	if err != nil {
@@ -60,8 +60,9 @@ func extract7z(ctx context.Context, source, output string, opts Config) error {
 		return err
 	}
 	var selected *Entry
+	requested := filepath.ToSlash(opts.Entry)
 	for i := range entries {
-		if opts.Entry == entries[i].Name || (opts.Entry == "" && len(entries) == 1) {
+		if requested == filepath.ToSlash(entries[i].Name) || (opts.Entry == "" && len(entries) == 1) {
 			if selected != nil {
 				return fmt.Errorf("7z archive contains duplicate entry names")
 			}
@@ -245,12 +246,24 @@ func parse7zEntries(listing string) ([]Entry, error) {
 		if !hasSize {
 			return nil, fmt.Errorf("7z returned an entry without its size")
 		}
-		if entry.Name == "" || !utf8.ValidString(entry.Name) || strings.IndexFunc(entry.Name, unicode.IsControl) >= 0 || strings.HasPrefix(entry.Name, "@") {
-			return nil, fmt.Errorf("7z entry name cannot be selected safely")
+		if err := validate7zName(entry.Name); err != nil {
+			return nil, err
 		}
 		entries = append(entries, entry)
 	}
 	return entries, nil
+}
+
+// Both creation and extraction must be able to select a member through the
+// engine's UTF-8, line-oriented listing and command-line filename syntax.
+func validate7zName(name string) error {
+	if strings.HasPrefix(name, "@") {
+		return fmt.Errorf("7z filename cannot begin with @")
+	}
+	if name == "" || !utf8.ValidString(name) || strings.IndexFunc(name, unicode.IsControl) >= 0 {
+		return fmt.Errorf("7z entry name cannot be selected safely")
+	}
+	return nil
 }
 
 // Technical listings may include Windows flags followed by a POSIX mode.

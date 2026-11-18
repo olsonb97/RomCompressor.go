@@ -403,23 +403,72 @@ func readWUATitleName(ctx context.Context, path string) (string, error) {
 		return "", fmt.Errorf("Wii U app.xml exceeds 1 MiB")
 	}
 	var app struct {
-		XMLName xml.Name `xml:"app"`
-		ID      string   `xml:"title_id"`
-		Version string   `xml:"title_version"`
+		XMLName  xml.Name      `xml:"app"`
+		IDs      []wuaXMLValue `xml:"title_id"`
+		Versions []wuaXMLValue `xml:"title_version"`
 	}
 	// Cemu matches literal names such as app and title_id. Preserve XML
 	// prefixes so a same-local-name element from elsewhere cannot match.
-	tokens := wuaXMLTokens{xml.NewDecoder(bytes.NewReader(data))}
-	if err := xml.NewTokenDecoder(tokens).Decode(&app); err != nil {
-		return "", fmt.Errorf("read Wii U app.xml: %w", err)
+	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
+	decoder := xml.NewTokenDecoder(wuaXMLTokens{xml.NewDecoder(bytes.NewReader(data))})
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", fmt.Errorf("read Wii U app.xml: %w", err)
+		}
+		switch node := token.(type) {
+		case xml.StartElement:
+			if app.XMLName.Local != "" {
+				return "", fmt.Errorf("Wii U app.xml contains multiple roots")
+			}
+			if err := decoder.DecodeElement(&app, &node); err != nil {
+				return "", fmt.Errorf("read Wii U app.xml: %w", err)
+			}
+		case xml.CharData:
+			if len(bytes.Trim(node, " \t\r\n")) != 0 {
+				return "", fmt.Errorf("unexpected text outside the Wii U app.xml root")
+			}
+		}
 	}
-	idText := strings.TrimSpace(app.ID)
-	versionText := strings.TrimSpace(app.Version)
+	if len(app.IDs) != 1 || len(app.Versions) != 1 {
+		return "", fmt.Errorf("Wii U app.xml requires exactly one title_id and one title_version")
+	}
+	idText := string(app.IDs[0])
+	versionText := string(app.Versions[0])
 	if len(idText) != 16 || !unsignedWUAValue(idText, 16, 64) || !unsignedWUAValue(versionText, 16, 16) {
 		return "", fmt.Errorf("invalid title ID or version in Wii U app.xml")
 	}
 	version, _ := strconv.ParseUint(versionText, 16, 16)
 	return fmt.Sprintf("%s_v%d", strings.ToLower(idText), version), nil
+}
+
+type wuaXMLValue string
+
+// Cemu reads the first text node. Joining fragments could produce a different
+// title ID or version from the one Cemu reads from the archived app.xml.
+func (value *wuaXMLValue) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) error {
+	var seenText bool
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		switch node := token.(type) {
+		case xml.EndElement:
+			return nil
+		case xml.CharData:
+			if seenText {
+				return fmt.Errorf("Wii U %s contains multiple text fragments", start.Name.Local)
+			}
+			*value = wuaXMLValue(bytes.Trim(node, " \t\r\n"))
+			seenText = true
+		case xml.StartElement:
+			return fmt.Errorf("Wii U %s contains a nested element", start.Name.Local)
+		}
+	}
 }
 
 type wuaXMLTokens struct{ *xml.Decoder }

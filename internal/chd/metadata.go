@@ -66,24 +66,27 @@ func (image rawCHD) checkRaw(ctx context.Context, path string) error {
 
 // MetadataFile rejects invalid links before chdman walks the chain to
 // verify the overall checksum. CHD v3 and v4 can also read metadata on open.
-func MetadataFile(path string, limit int64, media string) (uint32, error) {
+func MetadataFile(ctx context.Context, path string, limit int64, media string) (uint32, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	file, info, err := fileops.OpenRegular(path)
 	if err != nil {
 		return 0, err
 	}
 	defer file.Close()
-	version, _, err := readMetadata(context.Background(), file, info.Size(), limit, media)
+	version, _, err := readMetadata(ctx, file, info.Size(), limit, media, nil)
 	return version, err
 }
 
 // Media reports the media type named by a structurally valid CHD's metadata.
 // Untagged raw images remain unidentified; sector size does not establish media.
 func Media(ctx context.Context, src io.ReaderAt, size int64) (string, error) {
-	_, media, err := readMetadata(ctx, src, size, math.MaxInt64, "")
+	_, media, err := readMetadata(ctx, src, size, math.MaxInt64, "", nil)
 	return media, err
 }
 
-func readMetadata(ctx context.Context, src io.ReaderAt, size, limit int64, media string) (uint32, string, error) {
+func readMetadata(ctx context.Context, src io.ReaderAt, size, limit int64, media string, visit func(chdMetadata) error) (uint32, string, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, "", err
 	}
@@ -142,27 +145,23 @@ func readMetadata(ctx context.Context, src io.ReaderAt, size, limit int64, media
 		return 0, "", fmt.Errorf("DVD CHD requires a v5 image with 2048-byte sectors")
 	}
 	offset := binary.BigEndian.Uint64(header[metaAt:])
-	foundMedia := false
 	detected := ""
-	err := walkCHDMetadataContext(ctx, src, uint64(size), uint64(headerSize), offset, func(entry chdMetadata) error {
-		tagged := chdMetadataMedia(entry.tag)
-		if tagged == "" {
-			return nil
+	err := walkCHDMetadata(ctx, src, uint64(size), uint64(headerSize), offset, func(entry chdMetadata) error {
+		if tagged := chdMetadataMedia(entry.tag); tagged != "" {
+			if detected != "" && detected != tagged {
+				return fmt.Errorf("CHD contains conflicting %s and %s media metadata", detected, tagged)
+			}
+			if media != "" && tagged != media {
+				return fmt.Errorf("CHD %s metadata conflicts with requested %s media", tagged, media)
+			}
+			detected = tagged
 		}
-		if detected != "" && detected != tagged {
-			return fmt.Errorf("CHD contains conflicting %s and %s media metadata", detected, tagged)
+		if visit != nil {
+			return visit(entry)
 		}
-		detected = tagged
-		if media == "" {
-			return nil
-		}
-		if tagged != media {
-			return fmt.Errorf("CHD %s metadata conflicts with requested %s media", tagged, media)
-		}
-		foundMedia = true
 		return nil
 	})
-	if err == nil && media != "" && media != "dvd" && !foundMedia {
+	if err == nil && media != "" && media != "dvd" && detected == "" {
 		err = fmt.Errorf("CHD lacks %s media metadata", media)
 	}
 	return version, detected, err
@@ -189,11 +188,7 @@ type chdMetadata struct {
 	length uint64
 }
 
-func walkCHDMetadata(src io.ReaderAt, size, headerSize, offset uint64, visit func(chdMetadata) error) error {
-	return walkCHDMetadataContext(context.Background(), src, size, headerSize, offset, visit)
-}
-
-func walkCHDMetadataContext(ctx context.Context, src io.ReaderAt, size, headerSize, offset uint64, visit func(chdMetadata) error) error {
+func walkCHDMetadata(ctx context.Context, src io.ReaderAt, size, headerSize, offset uint64, visit func(chdMetadata) error) error {
 	const maxRecords = 1024
 	seen := make(map[uint64]struct{})
 	type extent struct{ start, end uint64 }

@@ -2,12 +2,81 @@ package fileops
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestStageReadAtPreservesEncoderPosition(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "output-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	stage := NewBoundedStageFile(f, 4)
+	if _, err := stage.Write([]byte("abc")); err != nil {
+		t.Fatal(err)
+	}
+	var data [2]byte
+	if n, err := stage.ReadAt(data[:], 1); n != 2 || err != nil || string(data[:]) != "bc" {
+		t.Fatalf("read staged bytes: %q, %d, %v", data, n, err)
+	}
+	if n, err := stage.ReadAt(data[:], 2); n != 1 || !errors.Is(err, io.EOF) || data[0] != 'c' {
+		t.Fatalf("read past staged data: %q, %d, %v", data, n, err)
+	}
+	if _, err := stage.Write([]byte("d")); err != nil {
+		t.Fatal(err)
+	}
+	var result [4]byte
+	if _, err := stage.ReadAt(result[:], 0); err != nil || string(result[:]) != "abcd" {
+		t.Fatalf("resumed write changed prior output: %q, %v", result, err)
+	}
+}
+
+func TestScanDuringScratchCleanup(t *testing.T) {
+	ctx := context.Background()
+	stage := t.TempDir()
+	done := make(chan error, 1)
+	go func() {
+		for i := range 500 {
+			path := filepath.Join(stage, fmt.Sprintf("scratch-%d", i))
+			if err := os.Mkdir(path, 0700); err != nil {
+				done <- err
+				return
+			}
+			if err := os.Remove(path); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+scanning:
+	for {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+			break scanning
+		default:
+			if err := Scan(ctx, stage, 100, 10000); err != nil {
+				<-done
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := os.Remove(stage); err != nil {
+		t.Fatal(err)
+	}
+	if err := Scan(ctx, stage, 100, 100); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("disappearing staging root: %v", err)
+	}
+}
 
 func TestStageCleanupDoesNotRemoveReplacement(t *testing.T) {
 	root := t.TempDir()

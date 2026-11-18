@@ -19,6 +19,11 @@ func SnapshotStat(path string, stat func(string) (os.FileInfo, error)) (os.FileI
 	// Windows path-based FileInfo loads its file ID on the first SameFile
 	// call. Capture it now while the path still names the selected file.
 	if !os.SameFile(info, info) {
+		// A scratch entry can disappear between stat and Windows' lazy ID
+		// lookup. Preserve the filesystem error for callers monitoring it.
+		if _, err := stat(path); err != nil {
+			return nil, err
+		}
 		return nil, fmt.Errorf("snapshot file identity for %q", path)
 	}
 	return info, nil

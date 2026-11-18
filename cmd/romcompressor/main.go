@@ -243,7 +243,7 @@ func executeConversion(ctx context.Context, a arguments, stdout, stderr io.Write
 			return err
 		}
 		if output == "" {
-			output, err = decompressedOutput(a.paths[0], opts, info)
+			output, err = decompressedOutput(ctx, a.paths[0], opts, info)
 			if err != nil {
 				return err
 			}
@@ -302,7 +302,7 @@ func defaultOutput(ctx context.Context, source string, opts romcompressor.Option
 	if err != nil {
 		return "", err
 	}
-	return decompressedOutput(source, opts, info)
+	return decompressedOutput(ctx, source, opts, info)
 }
 
 func playlistFile(source string) bool {
@@ -328,7 +328,7 @@ func archiveSelectionError(info romcompressor.FileInfo, opts romcompressor.Optio
 	return fmt.Errorf("7z archive contains %d files; select one with --entry NAME (use inspect to list entries)", len(info.Entries))
 }
 
-func decompressedOutput(source string, opts romcompressor.Options, info romcompressor.FileInfo) (string, error) {
+func decompressedOutput(ctx context.Context, source string, opts romcompressor.Options, info romcompressor.FileInfo) (string, error) {
 	if err := archiveSelectionError(info, opts); err != nil {
 		return "", err
 	}
@@ -339,7 +339,16 @@ func decompressedOutput(source string, opts romcompressor.Options, info romcompr
 	case romcompressor.CHD:
 		switch opts.Media {
 		case "cd":
-			return base + ".cue", nil
+			plan, err := romcompressor.PlanConversions(ctx, source, opts)
+			if err != nil {
+				return "", err
+			}
+			for _, target := range plan.Targets {
+				if target.Format == romcompressor.Raw && target.Media == "cd" {
+					return base + target.Extension, nil
+				}
+			}
+			return "", errors.New("this CHD track layout cannot be restored as a disc descriptor")
 		case "dvd":
 			return base + ".iso", nil
 		case "hdd":

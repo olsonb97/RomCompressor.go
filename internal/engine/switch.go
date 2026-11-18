@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +14,32 @@ import (
 	kind "github.com/olsonb97/romcompressor.go/internal/format"
 	"github.com/olsonb97/romcompressor.go/internal/process"
 )
+
+// NSZ 5 copies the first 512 bytes and starts a new HFS0 at 0xf000 in both
+// directions. Any data in between, including a certificate, would disappear.
+func checkSwitchCardHeader(path string, compress bool, limit int64) error {
+	file, info, err := fileops.OpenRegular(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	if compress && info.Size() > limit {
+		return fmt.Errorf("Switch source exceeds the expanded size limit")
+	}
+	var header [0xf004]byte
+	if _, err := io.ReadFull(file, header[:]); err != nil {
+		return fmt.Errorf("read Switch gamecard header: %w", err)
+	}
+	if string(header[0x100:0x104]) != "HEAD" || binary.LittleEndian.Uint64(header[0x130:]) != 0xf000 || string(header[0xf000:]) != "HFS0" {
+		return fmt.Errorf("NSZ requires a Switch gamecard with its root HFS0 at offset 0xf000")
+	}
+	for _, b := range header[0x200:0xf000] {
+		if b != 0 {
+			return fmt.Errorf("NSZ cannot preserve nonzero gamecard header or certificate bytes between offsets 0x200 and 0xf000")
+		}
+	}
+	return nil
+}
 
 func convertSwitch(ctx context.Context, source, output string, input string, opts Config) error {
 	ext := strings.ToLower(filepath.Ext(source))
@@ -75,7 +102,7 @@ func convertSwitch(ctx context.Context, source, output string, input string, opt
 		}
 	} else {
 		if err = runSwitchVerify(ctx, tool, engineStage, keys, generated); err != nil {
-			return err
+			return fmt.Errorf("verify restored %s: %w", strings.ToUpper(targetExt[1:]), err)
 		}
 	}
 	return os.Rename(generated, output)
@@ -182,7 +209,7 @@ func runSwitch(ctx context.Context, tool string, stage fileops.Stage, status *sw
 		return ctx.Err()
 	}
 	if err != nil {
-		return fmt.Errorf("NSZ failed; check your keys file and use NSZ 5.0 or newer")
+		return fmt.Errorf("NSZ could not process this input; check the image layout, keys file and NSZ version (5.0 or newer)")
 	}
 	if err = status.consume(); err != nil {
 		return err

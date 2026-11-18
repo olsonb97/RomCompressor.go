@@ -67,8 +67,6 @@ func known(format Format) bool {
 
 func dolphinFormat(format Format) bool { return kind.Dolphin(string(format)) }
 
-func threeDSFormat(format Format) bool { return kind.ThreeDS(string(format)) }
-
 func validateTools(tools map[string]string) error {
 	for tool := range tools {
 		switch tool {

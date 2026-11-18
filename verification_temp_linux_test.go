@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/olsonb97/romcompressor.go/internal/testfixture"
 )
 
 func TestPublicExternalVerifyUsesSelectedScratchParent(t *testing.T) {
@@ -15,7 +17,7 @@ func TestPublicExternalVerifyUsesSelectedScratchParent(t *testing.T) {
 		t.Fatal(err)
 	}
 	source, tool, marker := filepath.Join(dir, "game.rvz"), filepath.Join(dir, "dolphin"), filepath.Join(dir, "observed")
-	original := []byte{'R', 'V', 'Z', 1}
+	original := testfixture.RVZHeader(2048)
 	if err := os.WriteFile(source, original, 0600); err != nil {
 		t.Fatal(err)
 	}

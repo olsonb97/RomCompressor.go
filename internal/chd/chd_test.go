@@ -13,6 +13,14 @@ import (
 
 const testMaxOutput int64 = 1 << 40
 
+func TestMetadataFileHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := MetadataFile(ctx, filepath.Join(t.TempDir(), "absent.chd"), testMaxOutput, ""); err != context.Canceled {
+		t.Fatalf("metadata lookup after cancellation: %v", err)
+	}
+}
+
 func TestVerifyCHDRejectsCyclicMetadataBeforeLaunch(t *testing.T) {
 	for _, tc := range []struct {
 		name            string
@@ -47,7 +55,7 @@ func TestVerifyCHDRejectsCyclicMetadataBeforeLaunch(t *testing.T) {
 			if err := os.WriteFile(path, data, 0600); err != nil {
 				t.Fatal(err)
 			}
-			if version, err := MetadataFile(path, testMaxOutput, ""); err != nil || version != tc.version {
+			if version, err := MetadataFile(context.Background(), path, testMaxOutput, ""); err != nil || version != tc.version {
 				t.Fatalf("valid metadata chain returned version %d, %v", version, err)
 			}
 			if err := Verify(context.Background(), "no-engine", path, 2047, ""); err == nil || !strings.Contains(err.Error(), "expanded size limit") {
@@ -103,7 +111,7 @@ func TestCHDMediaSelection(t *testing.T) {
 			if err := os.WriteFile(path, data, 0600); err != nil {
 				t.Fatal(err)
 			}
-			_, err := MetadataFile(path, testMaxOutput, test.media)
+			_, err := MetadataFile(context.Background(), path, testMaxOutput, test.media)
 			if test.want == "" && err != nil || test.want != "" && (err == nil || !strings.Contains(err.Error(), test.want)) {
 				t.Fatalf("media validation = %v, want %q", err, test.want)
 			}
@@ -112,12 +120,17 @@ func TestCHDMediaSelection(t *testing.T) {
 }
 
 func TestCHDRestorationChecksTrackModeEvenWhenSectorSizesMatch(t *testing.T) {
-	track := chdCueTrack{mode: "MODE2/2048", sectorBytes: 2048, frames: 4}
-	if err := matchCHDCDTrack("CHTR", "TRACK:1 TYPE:MODE1 SUBTYPE:NONE FRAMES:4", 1, track); err == nil {
-		t.Fatal("accepted the same bytes with a different track mode")
-	}
-	if err := matchCHDCDTrack("CHTR", "TRACK:1 TYPE:MODE2_FORM1 SUBTYPE:NONE FRAMES:4", 1, track); err != nil {
-		t.Fatal(err)
+	track := chdCueTrack{mode: "MODE2/2048", subtype: "NONE", sectorBytes: 2048, frames: 4}
+	for _, mode := range []string{"MODE1", "MODE2_FORM1"} {
+		want, err := parseCDTrack("CHTR", "TRACK:1 TYPE:"+mode+" SUBTYPE:NONE FRAMES:4", 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		layout := cdManifest{tracks: []chdCueTrack{want}}
+		err = layout.verify(context.Background(), []chdCueFile{{tracks: []chdCueTrack{track}}})
+		if (err == nil) != (mode == "MODE2_FORM1") {
+			t.Fatalf("mode %s: %v", mode, err)
+		}
 	}
 }
 
@@ -150,6 +163,11 @@ func TestCHDCUETrackGeometry(t *testing.T) {
 		{"combined pregaps", "TRACK 01 AUDIO\n PREGAP 00:00:02\n INDEX 00 00:00:00\n INDEX 01 00:00:01\n", 8 * 2352, "virtual and stored pregap"},
 		{"zero pregap replacing a stored pregap", "TRACK 01 AUDIO\n INDEX 00 00:00:00\n INDEX 01 00:00:02\n PREGAP 00:00:00\n", 8 * 2352, "virtual and stored pregap"},
 		{"stored pregap", "TRACK 01 AUDIO\n INDEX 00 00:00:00\n INDEX 01 00:00:02\n", 8 * 2352, ""},
+		{"single session label", "REM SESSION 01\n TRACK 01 AUDIO\n INDEX 01 00:00:00\n", 8 * 2352, ""},
+		{"second session", "REM SESSION 02\n TRACK 01 AUDIO\n INDEX 01 00:00:00\n", 8 * 2352, "single-session"},
+		{"session lead-in", "REM LEAD-IN 00:01:00\n TRACK 01 AUDIO\n INDEX 01 00:00:00\n", 8 * 2352, "session lead-in"},
+		{"lowercase track mode", "TRACK 01 audio\n INDEX 01 00:00:00\n", 8 * 2352, "unsupported CUE track mode"},
+		{"CDG shorthand", "TRACK 01 CDG\n INDEX 01 00:00:00\n", 8 * 2448, "unsupported CUE track mode"},
 		{"virtual pregap", "TRACK 01 AUDIO\n PREGAP 00:00:02\n INDEX 01 00:00:00\n", 8 * 2352, ""},
 		{"unterminated comment", "TRACK 01 AUDIO\n INDEX 01 00:00:00\n REM comment", 8 * 2352, ""},
 	} {
@@ -290,6 +308,7 @@ func TestCHDRestorationChecksBINChecksumAndTrackGaps(t *testing.T) {
 	binary.BigEndian.PutUint32(data[12:16], 5)
 	binary.BigEndian.PutUint64(data[32:40], 4*chdCDFrameBytes)
 	binary.BigEndian.PutUint64(data[48:56], chdV5HeaderSize)
+	binary.BigEndian.PutUint32(data[56:60], 4*chdCDFrameBytes)
 	binary.BigEndian.PutUint32(data[60:64], chdCDFrameBytes)
 	canonical := make([]byte, 4*chdCDFrameBytes)
 	audioFrame := bytes.Repeat([]byte{0x36, 0x15}, 2352/2)
@@ -301,6 +320,11 @@ func TestCHDRestorationChecksBINChecksumAndTrackGaps(t *testing.T) {
 	copy(entry, "CHT2")
 	binary.BigEndian.PutUint32(entry[4:8], uint32(len(metadata))|1<<24)
 	copy(entry[16:], metadata)
+	// chdman reads the textual track table first, even if an older copy remains.
+	binary.BigEndian.PutUint64(entry[8:16], uint64(len(data)))
+	var legacy [16]byte
+	copy(legacy[:], "CHCD")
+	data = append(data, legacy[:]...)
 	if err := os.WriteFile(chd, data, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -313,20 +337,30 @@ func TestCHDRestorationChecksBINChecksumAndTrackGaps(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if err := verifyRestoredCHDCD(ctx, chd, cue, bin, testMaxOutput); err != nil {
+	if err := verifyCreatedCUE(ctx, cue, chd, testMaxOutput); err != nil {
+		t.Fatal(err)
+	}
+	layout, err := cdExtractionLayout(ctx, chd, testMaxOutput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.verifyRestored(ctx, cue, bin, testMaxOutput); err != nil {
 		t.Fatal(err)
 	}
 	track[0] ^= 1
 	if err := os.WriteFile(bin, track, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyRestoredCHDCD(ctx, chd, cue, bin, testMaxOutput); err == nil || !strings.Contains(err.Error(), "raw SHA-1") {
+	if err := layout.verifyRestored(ctx, cue, bin, testMaxOutput); err == nil || !strings.Contains(err.Error(), "raw SHA-1") {
 		t.Fatalf("expected changed BIN bytes to fail verification, got %v", err)
+	}
+	if err := verifyCreatedCUE(ctx, cue, chd, testMaxOutput); err == nil || !strings.Contains(err.Error(), "raw SHA-1") {
+		t.Fatalf("accepted an internally consistent CHD made from different input bytes: %v", err)
 	}
 	if err := os.WriteFile(cue, []byte(strings.Replace(cueText, "INDEX 01 00:00:01", "INDEX 01 00:00:00", 1)), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyRestoredCHDCD(ctx, chd, cue, bin, testMaxOutput); err == nil || !strings.Contains(err.Error(), "track 1 differs") {
+	if err := layout.verifyRestored(ctx, cue, bin, testMaxOutput); err == nil || !strings.Contains(err.Error(), "track 1 differs") {
 		t.Fatalf("expected changed CUE pregap to fail verification, got %v", err)
 	}
 }

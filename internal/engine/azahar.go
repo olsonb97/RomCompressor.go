@@ -53,20 +53,12 @@ func parse3DSHeader(b []byte, size int64) (threeDSHeader, error) {
 	return h, nil
 }
 
-func read3DSHeader(ctx context.Context, path string, limit int64) (threeDSHeader, error) {
-	if err := ctx.Err(); err != nil {
-		return threeDSHeader{}, err
-	}
-	f, st, err := fileops.OpenRegular(path)
-	if err != nil {
-		return threeDSHeader{}, err
-	}
-	defer f.Close()
+func read3DSMetadata(ctx context.Context, f io.ReaderAt, size, limit int64) (threeDSHeader, error) {
 	var header [32]byte
-	if _, err = io.ReadFull(f, header[:]); err != nil {
+	if _, err := f.ReadAt(header[:], 0); err != nil {
 		return threeDSHeader{}, err
 	}
-	h, err := parse3DSHeader(header[:], st.Size())
+	h, err := parse3DSHeader(header[:], size)
 	if err != nil {
 		return h, err
 	}
@@ -78,7 +70,20 @@ func read3DSHeader(ctx context.Context, path string, limit int64) (threeDSHeader
 	}
 	metadataStart := int64(binary.LittleEndian.Uint16(header[10:12]))
 	metadata := io.NewSectionReader(f, metadataStart, int64(h.offset)-metadataStart)
-	if err := validate3DSMetadata(ctx, metadata); err != nil {
+	return h, validate3DSMetadata(ctx, metadata)
+}
+
+func read3DSHeader(ctx context.Context, path string, limit int64) (threeDSHeader, error) {
+	if err := ctx.Err(); err != nil {
+		return threeDSHeader{}, err
+	}
+	f, st, err := fileops.OpenRegular(path)
+	if err != nil {
+		return threeDSHeader{}, err
+	}
+	defer f.Close()
+	h, err := read3DSMetadata(ctx, f, st.Size(), limit)
+	if err != nil {
 		return h, err
 	}
 	// Seek-table lengths must agree with the outer header; otherwise an engine
@@ -137,6 +142,9 @@ func read3DSHeader(ctx context.Context, path string, limit int64) (threeDSHeader
 }
 
 func validate3DSMetadata(ctx context.Context, metadata *io.SectionReader) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if metadata.Size() == 0 {
 		return nil
 	}
@@ -159,11 +167,25 @@ func validate3DSMetadata(ctx context.Context, metadata *io.SectionReader) error 
 		}
 		remaining -= 4
 		length := int(item[1]) + int(binary.LittleEndian.Uint16(item[2:]))
-		if item[0] == 0 && length == 0 && remaining == 0 {
-			return nil
-		}
-		if item[0] == 0 || int64(length) > remaining {
+		if int64(length) > remaining || item[0] == 0 && length != 0 {
 			return fmt.Errorf("invalid Z3DS metadata item length or terminator")
+		}
+		if item[0] == 0 {
+			// Azahar's WriteMetadata rounds the section size up to 16 bytes.
+			// Older unpadded sections can end immediately after the marker.
+			if remaining != 0 && (remaining >= 16 || metadata.Size()%16 != 0) {
+				return fmt.Errorf("invalid Z3DS metadata padding length")
+			}
+			padding, err := r.Peek(int(remaining))
+			if err != nil {
+				return err
+			}
+			for _, b := range padding {
+				if b != 0 {
+					return fmt.Errorf("invalid nonzero Z3DS metadata padding")
+				}
+			}
+			return ctx.Err()
 		}
 		if _, err := r.Discard(length); err != nil {
 			return err

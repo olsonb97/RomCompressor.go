@@ -259,6 +259,19 @@ func TestWUATitleMetadataUsesLiteralElementNames(t *testing.T) {
 		valid bool
 	}{
 		{"unqualified", "<app>" + fields + "</app>", true},
+		{"typed scalars with whitespace", "<app><title_id type=\"hexBinary\" length=\"8\">\n 000500001234abcd \t</title_id><title_version type=\"hexBinary\" length=\"2\"> 0010\n</title_version></app>", true},
+		{"single CDATA", "<app><title_id><![CDATA[000500001234abcd]]></title_id><title_version><![CDATA[ 0010 ]]></title_version></app>", true},
+		{"nested ID fragment", "<app><title_id>00050000<part/>1234abcd</title_id><title_version>0010</title_version></app>", false},
+		{"split version across CDATA", "<app><title_id>000500001234abcd</title_id><title_version>00<![CDATA[10]]></title_version></app>", false},
+		{"split across comment", "<app><title_id>00050000<!-- comment -->1234abcd</title_id><title_version>0010</title_version></app>", false},
+		{"nonbreaking space before ID", "<app><title_id>&#xa0;000500001234abcd</title_id><title_version>0010</title_version></app>", false},
+		{"UTF-8 BOM and comments", "\ufeff<?xml version=\"1.0\"?>\n<!-- title --><app>" + fields + "</app>\n<!-- end -->", true},
+		{"duplicate title ID", "<app>" + fields + "<title_id>0005000011111111</title_id></app>", false},
+		{"duplicate version", "<app>" + fields + "<title_version>0011</title_version></app>", false},
+		{"second root", "<app>" + fields + "</app><app>" + fields + "</app>", false},
+		{"leading junk", "incomplete<app>" + fields + "</app>", false},
+		{"trailing junk", "<app>" + fields + "</app>incomplete", false},
+		{"truncated closing document", "<app>" + fields + "</app><", false},
 		{"default namespace", `<app xmlns="urn:app">` + fields + "</app>", true},
 		{"prefixed root", `<other:app xmlns:other="urn:other">` + fields + "</other:app>", false},
 		{"prefixed ID", `<app xmlns:other="urn:other"><other:title_id>000500001234abcd</other:title_id><title_version>0010</title_version></app>`, false},
@@ -275,9 +288,34 @@ func TestWUATitleMetadataUsesLiteralElementNames(t *testing.T) {
 				t.Fatalf("readWUATitleName = %q, %v; want %q", name, err, testWUATitle)
 			}
 			if !test.valid && err == nil {
-				t.Fatalf("accepted prefixed XML metadata as %q", name)
+				t.Fatalf("accepted ambiguous or malformed XML metadata as %q", name)
 			}
 		})
+	}
+}
+
+func TestWUAPlanAndConversionRefuseConflictingTitleIDs(t *testing.T) {
+	root := t.TempDir()
+	makeWUATitleFixture(t, root, "000500001234abcd", "0010")
+	metadata := []byte("<app><title_id>000500001234abcd</title_id><title_id>0005000011111111</title_id><title_version>0010</title_version></app>")
+	if err := os.WriteFile(filepath.Join(root, "code", "app.xml"), metadata, 0600); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := PlanConversions(t.Context(), root, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range plan.Targets {
+		if target.Format == WUA {
+			t.Fatal("planner offered WUA for conflicting title IDs")
+		}
+	}
+	out := filepath.Join(t.TempDir(), "title.wua")
+	if _, err := Convert(t.Context(), root, out, Options{Format: WUA}); err == nil || !strings.Contains(err.Error(), "title_id") {
+		t.Fatalf("expected a metadata error before running ZArchive, got %v", err)
+	}
+	if _, err := os.Lstat(out); !os.IsNotExist(err) {
+		t.Fatalf("unexpected archive after metadata error: %v", err)
 	}
 }
 
@@ -289,7 +327,7 @@ func makeWUATitleFixture(t *testing.T, root, id, version string) {
 		}
 	}
 	files := map[string][]byte{
-		"code/app.xml":      []byte(fmt.Sprintf("<app><title_id>%s</title_id><title_version>%s</title_version></app>", id, version)),
+		"code/app.xml":      []byte(fmt.Sprintf("<app><title_id type=\"hexBinary\" length=\"8\">%s</title_id><title_version type=\"hexBinary\" length=\"2\">%s</title_version></app>", id, version)),
 		"code/cos.xml":      []byte("<app><argstr>sample.rpx</argstr></app>"),
 		"content/data.bin":  bytes.Repeat([]byte("sample payload\x00\xff"), 8192),
 		"content/empty.txt": {},

@@ -237,7 +237,7 @@ func TestAutomaticArchiveOutputPreservesUnicodeNames(t *testing.T) {
 	}
 	for _, separator := range []rune{'\u2028', '\u2029'} {
 		info := romcompressor.FileInfo{Format: romcompressor.ZIP, Entries: []romcompressor.Entry{{Name: "line" + string(separator) + "break.gba"}}}
-		if _, err := decompressedOutput(source, romcompressor.Options{}, info); err == nil || !strings.Contains(err.Error(), "safe output path with -o") {
+		if _, err := decompressedOutput(t.Context(), source, romcompressor.Options{}, info); err == nil || !strings.Contains(err.Error(), "safe output path with -o") {
 			t.Fatalf("line separator became an implicit filename: %v", err)
 		}
 	}

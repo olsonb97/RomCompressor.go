@@ -16,6 +16,30 @@ import (
 	"github.com/olsonb97/romcompressor.go/internal/disc"
 )
 
+func TestGZIPVerificationProgressReportsUnknownTotal(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "disc.bin")
+	if err := os.WriteFile(source, []byte("disc bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	packed := filepath.Join(dir, "disc.gz")
+	if _, err := Convert(t.Context(), source, packed, Options{Format: GZIP}); err != nil {
+		t.Fatal(err)
+	}
+	var received bool
+	err := Verify(t.Context(), packed, Options{Progress: func(p Progress) {
+		if p.Phase == "verifying" && p.Bytes > 0 {
+			received = true
+			if p.Total != 0 {
+				t.Errorf("gzip verification reported total %d, want 0 for unknown", p.Total)
+			}
+		}
+	}})
+	if err != nil || !received {
+		t.Fatalf("verification progress missing: %v", err)
+	}
+}
+
 func TestNativeFileLifecycle(t *testing.T) {
 	for _, format := range []Format{ZIP, GZIP, CSO, ZSO} {
 		t.Run(string(format), func(t *testing.T) {
@@ -41,8 +65,26 @@ func TestNativeFileLifecycle(t *testing.T) {
 			if err := Verify(context.Background(), packed, Options{}); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := Convert(context.Background(), packed, restored, Options{Format: Raw, Progress: func(Progress) {}}); err != nil {
+			var converting, verifying bool
+			restore := Options{Format: Raw, Progress: func(p Progress) {
+				switch p.Phase {
+				case "converting":
+					converting = true
+					if p.Total != 0 && (format == GZIP || p.Total != int64(len(data))) {
+						t.Errorf("restore reported a conversion total of %d for %d expanded bytes", p.Total, len(data))
+					}
+				case "verifying":
+					verifying = true
+					if p.Total != int64(len(data)) {
+						t.Errorf("restore reported a verification total of %d, want %d", p.Total, len(data))
+					}
+				}
+			}}
+			if _, err := Convert(context.Background(), packed, restored, restore); err != nil {
 				t.Fatal(err)
+			}
+			if !converting || !verifying {
+				t.Fatalf("missing restore progress: converting=%t verifying=%t", converting, verifying)
 			}
 			got, err := os.ReadFile(restored)
 			if err != nil || !bytes.Equal(got, data) {

@@ -13,7 +13,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/olsonb97/romcompressor.go/internal/codec"
 	"github.com/olsonb97/romcompressor.go/internal/disc"
@@ -385,11 +384,12 @@ func stagePBPTracks(ctx context.Context, output string, files []pbpCueFile, hash
 }
 
 func pbpCueText(bin string, tracks []codec.PBPTrack) (string, error) {
-	if !utf8.ValidString(bin) || strings.ContainsAny(bin, "\"\\:\r\n\x00") || len(bin)+len("FILE \"\" BINARY\n") > 510 {
-		return "", fmt.Errorf("BIN filename cannot be represented safely in a CUE sheet")
+	fileLine, err := disc.BinaryCUEFile(bin)
+	if err != nil {
+		return "", err
 	}
 	var contents strings.Builder
-	fmt.Fprintf(&contents, "FILE \"%s\" BINARY\n", bin)
+	contents.WriteString(fileLine)
 	writeIndex := func(index, position int) {
 		fmt.Fprintf(&contents, "    INDEX %02d %02d:%02d:%02d\n", index, position/(60*75), position/75%60, position%75)
 	}

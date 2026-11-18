@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"fmt"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -15,6 +16,155 @@ import (
 	kind "github.com/olsonb97/romcompressor.go/internal/format"
 	"github.com/olsonb97/romcompressor.go/internal/testfixture"
 )
+
+func TestCHDDescriptorBackslashesOnPOSIX(t *testing.T) {
+	if filepath.Separator != '/' {
+		t.Skip("POSIX distinguishes backslashes from directory separators")
+	}
+	for _, tc := range []struct{ ext, layout string }{
+		{"cue", "FILE \"%s\" BINARY\n TRACK 01 MODE2/2352\n INDEX 01 00:00:00\n"},
+		{"gdi", "1\n1 0 4 2352 %s 0\n"},
+	} {
+		t.Run(tc.ext, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.Mkdir(filepath.Join(dir, "tracks"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			for i, name := range []string{"tracks/track.bin", `tracks\track.bin`} {
+				data := bytes.Repeat([]byte{byte(i)}, 2352*8)
+				if err := os.WriteFile(filepath.Join(dir, name), data, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, input := range []struct {
+				name, reference string
+				allowed         bool
+			}{
+				{"disc", "tracks/track.bin", true},
+				{"disc", `tracks\track.bin`, false},
+				{`literal\disc`, "tracks/track.bin", false},
+			} {
+				path := filepath.Join(dir, input.name+"."+tc.ext)
+				if err := os.WriteFile(path, []byte(fmt.Sprintf(tc.layout, input.reference)), 0600); err != nil {
+					t.Fatal(err)
+				}
+				plan, err := romcompressor.PlanConversions(t.Context(), path, romcompressor.Options{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var hasCHD, hasPBP bool
+				for _, target := range plan.Targets {
+					hasCHD = hasCHD || target.Format == romcompressor.CHD
+					hasPBP = hasPBP || target.Format == romcompressor.PBP
+				}
+				if hasCHD != input.allowed || tc.ext == "cue" && !hasPBP {
+					t.Fatalf("%q ref %q: CHD=%v PBP=%v", path, input.reference, hasCHD, hasPBP)
+				}
+				if input.allowed {
+					continue
+				}
+				out := filepath.Join(dir, "converted.chd")
+				_, err = romcompressor.Convert(t.Context(), path, out, romcompressor.Options{Format: romcompressor.CHD})
+				if err == nil || !strings.Contains(err.Error(), "backslashes") {
+					t.Fatalf("expected path rejection, got %v", err)
+				}
+				if _, err := os.Stat(out); !os.IsNotExist(err) {
+					t.Fatalf("refused conversion left output: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestCHDMixedFormRoundTrip(t *testing.T) {
+	tool := os.Getenv("ROMCOMPRESSOR_CHDMAN")
+	if tool == "" {
+		t.Skip("set ROMCOMPRESSOR_CHDMAN to exercise mixed-form restoration")
+	}
+	dir := t.TempDir()
+	cue := filepath.Join(dir, "mix.cue")
+	bin := filepath.Join(dir, "mix.bin")
+	const layout = "FILE mix.bin BINARY\n TRACK 01 MODE2/2336\n INDEX 01 00:00:00\n TRACK 02 MODE2_FORM_MIX\n INDEX 01 00:00:07\n"
+	data := testfixture.CHDTrack(make([]byte, 8*2336), 2336)
+	if err := os.WriteFile(cue, []byte(layout), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bin, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	opts := romcompressor.Options{Format: romcompressor.CHD, Tools: map[string]string{"chdman": tool}}
+	image := filepath.Join(dir, "mix.chd")
+	if _, err := romcompressor.Convert(ctx, cue, image, opts); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(dir, "restored.cue")
+	opts.Format, opts.Media = romcompressor.Raw, "cd"
+	if _, err := romcompressor.Convert(ctx, image, output, opts); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := os.ReadFile(output)
+	if err != nil || !strings.Contains(string(restored), "TRACK 01 MODE2/2336") || !strings.Contains(string(restored), "TRACK 02 MODE2_FORM_MIX") {
+		t.Fatalf("track modes changed: %q, %v", restored, err)
+	}
+	for _, name := range []string{bin, filepath.Join(dir, "restored.bin")} {
+		if got, err := os.ReadFile(name); err != nil || !bytes.Equal(got, data) {
+			t.Fatalf("track bytes changed: %s, %v", name, err)
+		}
+	}
+	opts.Format = romcompressor.CHD
+	repacked := filepath.Join(dir, "repacked.chd")
+	if _, err := romcompressor.Convert(ctx, output, repacked, opts); err != nil {
+		t.Fatal(err)
+	}
+	headerDigests := func(path string) [40]byte {
+		t.Helper()
+		file, err := os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer file.Close()
+		var hashes [40]byte // v5 raw SHA-1 followed by the digest including metadata.
+		if _, err := file.ReadAt(hashes[:], 64); err != nil {
+			t.Fatal(err)
+		}
+		return hashes
+	}
+	if headerDigests(image) != headerDigests(repacked) {
+		t.Fatal("recompressing the restored CUE changed disc data or metadata")
+	}
+}
+
+func TestCHDOrdinaryCDRestoresUppercaseCUE(t *testing.T) {
+	tool := os.Getenv("ROMCOMPRESSOR_CHDMAN")
+	if tool == "" {
+		t.Skip("set ROMCOMPRESSOR_CHDMAN to exercise CUE restoration")
+	}
+	dir := t.TempDir()
+	data := testfixture.CHDTrack(nil, 2048)
+	source := filepath.Join(dir, "disc.iso")
+	if err := os.WriteFile(source, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	opts := romcompressor.Options{Format: romcompressor.CHD, Media: "cd", Tools: map[string]string{"chdman": tool}}
+	image := filepath.Join(dir, "disc.chd")
+	if _, err := romcompressor.Convert(t.Context(), source, image, opts); err != nil {
+		t.Fatal(err)
+	}
+	opts.Format = romcompressor.Raw
+	out := filepath.Join(dir, "Disc 100%t.CUE")
+	if _, err := romcompressor.Convert(t.Context(), image, out, opts); err != nil {
+		t.Fatal(err)
+	}
+	cue, err := os.ReadFile(out)
+	if err != nil || !strings.Contains(string(cue), `FILE "Disc 100%t.bin" BINARY`) {
+		t.Fatalf("incorrect track reference: %q, %v", cue, err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "Disc 100%t.bin"))
+	if err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("restored CD bytes differ: %v", err)
+	}
+}
 
 func TestCHDCUERefusesLossyDreamcastConversion(t *testing.T) {
 	const single = "REM SINGLE-DENSITY AREA\n"
@@ -321,6 +471,8 @@ func TestCHDCUERejectsAmbiguousSectorLayout(t *testing.T) {
 		{"quoted subcode", "BINARY", `MODE1/2352 "RW_RAW"`, 8 * 2352, "CUE track subcode"},
 		{"lowercase subcode", "BINARY", "MODE1/2352 rw_raw", 8 * 2448, "CUE track subcode"},
 		{"known subcode", "BINARY", "MODE1/2352 RW_RAW", 8 * 2448, ""},
+		{"cooked data with subcode", "BINARY", "MODE1/2048 RW", 8 * (2048 + 96), ""},
+		{"audio with subcode", "BINARY", "AUDIO RW_RAW", 8 * 2448, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -348,7 +500,7 @@ func TestCHDCUERejectsAmbiguousSectorLayout(t *testing.T) {
 			check(chd.ValidateCUE(path, "", kind.DefaultMaxOutput))
 			if tool := os.Getenv("ROMCOMPRESSOR_CHDMAN"); tool != "" {
 				if tc.want == "" {
-					data = testfixture.CHDTrack(data, 2448)
+					data = testfixture.CHDTrack(data, tc.size/8)
 					if err := os.WriteFile(input, data, 0600); err != nil {
 						t.Fatal(err)
 					}
@@ -387,6 +539,11 @@ func TestCHDCUEChecksWaveDataLayoutAndIndexes(t *testing.T) {
 	}
 	pcm := bytes.Repeat([]byte{0x18, 0x42, 0x61, 0x8a}, 8*588)
 	fmtChunk, dataChunk := chunk("fmt ", format[:]), chunk("data", pcm)
+	changedFormat := func(offset int, value byte) [][]byte {
+		modified := format
+		modified[offset] = value
+		return [][]byte{chunk("fmt ", modified[:]), dataChunk}
+	}
 	valid := [][]byte{fmtChunk, dataChunk}
 	const firstFrame = " INDEX 01 00:00:00\n"
 	for _, test := range []struct {
@@ -395,6 +552,10 @@ func TestCHDCUEChecksWaveDataLayoutAndIndexes(t *testing.T) {
 		wantError     string
 	}{
 		{"one audio extent", firstFrame, valid, ""},
+		{"floating point", firstFrame, changedFormat(0, 3), "stereo PCM"},
+		{"mono audio", firstFrame, changedFormat(2, 1), "stereo PCM"},
+		{"different sample rate", firstFrame, changedFormat(4, 0), "stereo PCM"},
+		{"24-bit audio", firstFrame, changedFormat(14, 24), "stereo PCM"},
 		{"stored pregap", " INDEX 00 00:00:00\n INDEX 01 00:00:02\n", valid, ""},
 		{"trailing odd metadata", firstFrame, [][]byte{fmtChunk, dataChunk, chunk("JUNK", []byte{1})}, ""},
 		{"audio before fmt", firstFrame, [][]byte{dataChunk, fmtChunk, chunk("data", pcm[:2500])}, "one audio data chunk"},

@@ -2,10 +2,12 @@ package chd
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -15,8 +17,10 @@ import (
 )
 
 type chdCueTrack struct {
+	padFrames   int64 // GD-ROM zero frames between this track and the next LBA.
 	sectorBytes int64
 	mode        string
+	subtype     string
 	index0      int64
 	index1      int64
 	frames      int64
@@ -26,19 +30,73 @@ type chdCueTrack struct {
 }
 
 type chdCueFile struct {
-	path     string
-	size     int64
-	fileType string
-	tracks   []chdCueTrack
+	path       string
+	size       int64
+	dataOffset int64
+	dataSize   int64
+	fileType   string
+	tracks     []chdCueTrack
 }
 
 const chdCueWhitespace = " \t\n\v\f\r"
 
+// ValidateCDSource checks the layout chdman will select from the input extension.
+func ValidateCDSource(ctx context.Context, path string, limit int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".cue":
+		return ValidateCUE(path, "", limit)
+	case ".gdi":
+		return ValidateGDI(path, limit)
+	case ".nrg":
+		return ValidateNRG(ctx, path, limit)
+	case ".iso", ".cdr", ".toast":
+		info, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		// chdman's parse_iso tries sector sizes in this order. A CHD track
+		// occupies whole groups of four frames, including subchannel bytes.
+		for _, sector := range []int64{2048, 2336, 2352} {
+			if info.Mode().IsRegular() && info.Size() > 0 && info.Size()%sector == 0 {
+				return chargeCDTrack(&limit, info.Size()/sector)
+			}
+		}
+		return fmt.Errorf("CD image requires complete 2048-, 2336-, or 2352-byte sectors")
+	default:
+		// Unknown extensions would be interpreted as cdrdao descriptors.
+		return fmt.Errorf("CD CHD input must be a CUE/GDI descriptor or an ISO, CDR, Toast, or NRG image")
+	}
+}
+
+// Each track occupies whole groups of four 2448-byte frames in the CHD.
+func chargeCDTrack(remaining *int64, frames int64) error {
+	const groupBytes = 4 * chdCDFrameBytes
+	groups := (frames + 3) / 4
+	if groups > *remaining/groupBytes {
+		return fmt.Errorf("CD CHD exceeds the expanded size limit")
+	}
+	*remaining -= groups * groupBytes
+	return nil
+}
+
 // ValidateCUE checks the boundaries chdman derives from BIN lengths and CUE indexes.
 // A partial final sector is otherwise discarded by createcd.
 func ValidateCUE(path, expectedBin string, limit int64) error {
-	_, err := readCHDCUE(path, expectedBin, limit)
-	return err
+	files, err := readCHDCUE(path, expectedBin, limit)
+	if err != nil {
+		return err
+	}
+	for _, file := range files {
+		for _, track := range file.tracks {
+			if err := chargeCDTrack(&limit, track.frames); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func readCHDCUE(path, expectedBin string, limit int64) ([]chdCueFile, error) {
@@ -93,11 +151,21 @@ func readCHDCUE(path, expectedBin string, limit int64) ([]chdCueFile, error) {
 		}
 		switch directive {
 		case "REM":
+			comment := strings.TrimLeft(strings.TrimPrefix(strings.TrimLeft(line, chdCueWhitespace), fields[0]), chdCueWhitespace)
+			// chdman treats these REM prefixes as layout commands. A second
+			// session can shorten tracks or skip stored sectors in a shared BIN.
+			switch {
+			case strings.HasPrefix(comment, "SESSION"):
+				session := strings.Fields(comment)
+				if len(session) != 2 || session[0] != "SESSION" || strings.TrimLeft(session[1], "0") != "1" {
+					return nil, fmt.Errorf("CHD conversion supports only single-session CUE sheets")
+				}
+			case strings.HasPrefix(comment, "LEAD-IN"), strings.HasPrefix(comment, "LEAD-OUT"):
+				return nil, fmt.Errorf("CHD cannot preserve CUE session lead-in or lead-out boundaries")
+			}
 			if expectedBin == "" && token == "REM" {
 				// Older chdman versions strip stored pregaps when both density
 				// markers select the Dreamcast parser. Newer ones accept indentation.
-				comment := strings.TrimPrefix(strings.TrimLeft(line, chdCueWhitespace), fields[0])
-				comment = strings.TrimLeft(comment, chdCueWhitespace)
 				singleDensity = singleDensity || strings.HasPrefix(comment, "SINGLE-DENSITY AREA")
 				highDensity = highDensity || strings.HasPrefix(comment, "HIGH-DENSITY AREA")
 				if singleDensity && highDensity {
@@ -109,6 +177,9 @@ func readCHDCUE(path, expectedBin string, limit int64) ([]chdCueFile, error) {
 			match := disc.MatchCUEFile(strings.TrimSpace(line))
 			if fileIndex >= len(files) || match == nil {
 				return nil, fmt.Errorf("invalid CUE file directive")
+			}
+			if err := checkDescriptorPaths(path, match[1]+match[2]); err != nil {
+				return nil, err
 			}
 			// chdman strips both kinds of quotes from bare tokens, while
 			// reference validation treats them as literal filename bytes.
@@ -146,7 +217,11 @@ func readCHDCUE(path, expectedBin string, limit int64) ([]chdCueFile, error) {
 				return nil, err
 			}
 			f := &files[fileIndex]
-			f.tracks = append(f.tracks, chdCueTrack{sectorBytes: sector, mode: strings.ToUpper(fields[2]), index0: -1, index1: -1})
+			subtype := "NONE"
+			if len(fields) == 4 {
+				subtype = fields[3]
+			}
+			f.tracks = append(f.tracks, chdCueTrack{sectorBytes: sector, mode: fields[2], subtype: subtype, index0: -1, index1: -1})
 		case "PREGAP", "POSTGAP", "INDEX":
 			if fileIndex < 0 || len(files[fileIndex].tracks) == 0 {
 				return nil, fmt.Errorf("CUE index or gap appears before a track")
@@ -167,7 +242,8 @@ func readCHDCUE(path, expectedBin string, limit int64) ([]chdCueFile, error) {
 		return nil, fmt.Errorf("CUE references changed during validation")
 	}
 	var bytes int64
-	for _, file := range files {
+	for i := range files {
+		file := &files[i]
 		// chdman calculates shared-track offsets across adjacent tracks, even
 		// when they refer to different files at a boundary.
 		if len(files) > 1 && file.fileType == "BINARY" && len(file.tracks) > 1 {
@@ -192,6 +268,15 @@ func chdCueWhitespaceMatches(line string, fields []string) bool {
 		return ascii[0] == fields[0] && ascii[len(ascii)-1] == fields[len(fields)-1]
 	}
 	return slices.Equal(ascii, fields)
+}
+
+// chdman splits the descriptor's own path at its last backslash first, but
+// on POSIX it passes track filenames to open without translating backslashes.
+func checkDescriptorPaths(descriptor, track string) error {
+	if filepath.Separator == '/' && (strings.ContainsRune(descriptor, '\\') || strings.ContainsRune(track, '\\')) {
+		return fmt.Errorf("chdman requires POSIX descriptor and track paths without backslashes; use / for directories")
+	}
+	return nil
 }
 
 func (track *chdCueTrack) readPosition(fields []string) error {
@@ -244,65 +329,73 @@ func (track *chdCueTrack) readPosition(fields []string) error {
 
 // chdman uses the first data chunk after fmt and rounds down partial sectors.
 // Require one unambiguous PCM extent before deriving the CUE track frames.
-func readCHDWAVEDataSize(path string) (int64, error) {
+func readCHDWAVEExtent(path string) (offset, length int64, err error) {
 	file, info, err := fileops.OpenRegular(path)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer file.Close()
 	var riff [12]byte
 	if _, err := io.ReadFull(file, riff[:]); err != nil || string(riff[:4]) != "RIFF" || string(riff[8:12]) != "WAVE" {
-		return 0, fmt.Errorf("invalid CUE WAVE header")
+		return 0, 0, fmt.Errorf("invalid CUE WAVE header")
 	}
 	end := int64(binary.LittleEndian.Uint32(riff[4:8])) + 8
 	if end > info.Size() {
-		return 0, fmt.Errorf("truncated CUE WAVE file")
+		return 0, 0, fmt.Errorf("truncated CUE WAVE file")
 	}
 	var chunk [8]byte
-	var dataSize int64
 	formatSeen := false
 	for pos, count := int64(len(riff)), 0; pos < end; count++ {
 		if end-pos < int64(len(chunk)) || count >= 1024 {
-			return 0, fmt.Errorf("invalid or oversized CUE WAVE chunk layout")
+			return 0, 0, fmt.Errorf("invalid or oversized CUE WAVE chunk layout")
 		}
 		if _, err := file.ReadAt(chunk[:], pos); err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 		size := int64(binary.LittleEndian.Uint32(chunk[4:]))
 		pos += int64(len(chunk))
 		padded := size + size%2
 		if padded > end-pos {
-			return 0, fmt.Errorf("truncated CUE WAVE chunk")
+			return 0, 0, fmt.Errorf("truncated CUE WAVE chunk")
 		}
 		// chdman advances through chunks before the audio without RIFF padding.
 		kind := string(chunk[:4])
-		if dataSize == 0 && padded != size && kind != "data" {
-			return 0, fmt.Errorf("chdman cannot reliably read an odd-sized CUE WAVE chunk before audio")
+		if length == 0 && padded != size && kind != "data" {
+			return 0, 0, fmt.Errorf("chdman cannot reliably read an odd-sized CUE WAVE chunk before audio")
 		}
 		switch kind {
 		case "fmt ":
 			if formatSeen || size < 16 {
-				return 0, fmt.Errorf("invalid or duplicate CUE WAVE format chunk")
+				return 0, 0, fmt.Errorf("invalid or duplicate CUE WAVE format chunk")
+			}
+			var pcm [16]byte
+			if _, err := file.ReadAt(pcm[:], pos); err != nil {
+				return 0, 0, err
+			}
+			le := binary.LittleEndian
+			if le.Uint16(pcm[:2]) != 1 || le.Uint16(pcm[2:4]) != 2 || le.Uint32(pcm[4:8]) != 44100 || le.Uint16(pcm[14:]) != 16 {
+				return 0, 0, fmt.Errorf("CUE WAVE requires 44.1 kHz, 16-bit stereo PCM")
 			}
 			formatSeen = true
 		case "data":
-			if !formatSeen || dataSize != 0 {
-				return 0, fmt.Errorf("CUE WAVE requires one audio data chunk after the format chunk")
+			if !formatSeen || length != 0 {
+				return 0, 0, fmt.Errorf("CUE WAVE requires one audio data chunk after the format chunk")
 			}
 			if size == 0 || size%2352 != 0 {
-				return 0, fmt.Errorf("CUE WAVE audio must contain complete CD sectors")
+				return 0, 0, fmt.Errorf("CUE WAVE audio must contain complete CD sectors")
 			}
-			dataSize = size
+			length = size
+			offset = pos
 		}
 		pos += padded
 	}
-	if dataSize == 0 {
-		return 0, fmt.Errorf("CUE WAVE lacks a supported audio data chunk")
+	if length == 0 {
+		return 0, 0, fmt.Errorf("CUE WAVE lacks a supported audio data chunk")
 	}
-	return dataSize, nil
+	return offset, length, nil
 }
 
-func (file chdCueFile) checkTracks() error {
+func (file *chdCueFile) checkTracks() error {
 	if len(file.tracks) == 0 {
 		return fmt.Errorf("CUE file has no tracks")
 	}
@@ -315,11 +408,12 @@ func (file chdCueFile) checkTracks() error {
 			return fmt.Errorf("CUE WAVE requires an AUDIO track without subcode")
 		}
 		var err error
-		remaining, err = readCHDWAVEDataSize(file.path)
+		file.dataOffset, remaining, err = readCHDWAVEExtent(file.path)
 		if err != nil {
 			return err
 		}
 	}
+	file.dataSize = remaining
 	for i := range file.tracks {
 		track := &file.tracks[i]
 		if track.index1 < 0 || i == 0 && track.index0 != 0 {
@@ -346,17 +440,15 @@ func (file chdCueFile) checkTracks() error {
 
 func chdCueSectorSize(fields []string) (int64, error) {
 	var sector int64
-	switch strings.ToUpper(fields[0]) {
-	case "MODE1", "MODE1/2048", "MODE2/2048", "MODE2_FORM1":
+	switch canonicalCDMode(fields[0]) {
+	case "MODE1", "MODE2_FORM1":
 		sector = 2048
-	case "MODE2/2324", "MODE2_FORM2":
+	case "MODE2_FORM2":
 		sector = 2324
-	case "MODE2", "MODE2/2336", "MODE2_FORM_MIX":
+	case "MODE2", "MODE2_FORM_MIX":
 		sector = 2336
-	case "AUDIO", "MODE1/2352", "MODE1_RAW", "MODE2/2352", "MODE2_RAW", "CDI/2352":
+	case "AUDIO", "MODE1_RAW", "MODE2_RAW":
 		sector = 2352
-	case "CDG":
-		return 2448, nil
 	default:
 		return 0, fmt.Errorf("unsupported CUE track mode %q", fields[0])
 	}
@@ -364,6 +456,25 @@ func chdCueSectorSize(fields []string) (int64, error) {
 		sector += 96
 	}
 	return sector, nil
+}
+
+func canonicalCDMode(mode string) string {
+	switch mode {
+	case "MODE1/2048":
+		return "MODE1"
+	case "MODE1/2352":
+		return "MODE1_RAW"
+	case "MODE2/2048":
+		return "MODE2_FORM1"
+	case "MODE2/2324":
+		return "MODE2_FORM2"
+	case "MODE2/2336":
+		return "MODE2"
+	case "MODE2/2352", "CDI/2352":
+		return "MODE2_RAW"
+	default:
+		return mode
+	}
 }
 
 func chdCuePosition(value string) (int64, error) {

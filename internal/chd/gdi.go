@@ -36,7 +36,7 @@ func ValidateGDI(path string, limit int64) error {
 	scanner := bufio.NewScanner(io.LimitReader(file, disc.MaxDescriptorSize+1))
 	scanner.Buffer(make([]byte, 510), 510)
 	scanner.Scan() // The reference validation read the track count.
-	var previousEnd uint64
+	var previousStart, previousEnd uint64
 	i := 0
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -58,6 +58,9 @@ func ValidateGDI(path string, limit int64) error {
 		// tokens. They collapse repeated spaces and consume the offset when
 		// the opening and closing quotes appear in the same token.
 		quoted, bare := match[1], match[2]
+		if err := checkDescriptorPaths(path, quoted+bare); err != nil {
+			return err
+		}
 		if strings.ContainsAny(bare, "\"'") || quoted != "" && (!strings.Contains(quoted, " ") || strings.Contains(quoted, "  ")) {
 			return fmt.Errorf("ambiguous GDI track filename for chdman")
 		}
@@ -71,6 +74,12 @@ func ValidateGDI(path string, limit int64) error {
 		}
 		if i == 0 && lba != 0 {
 			return fmt.Errorf("chdman cannot preserve a nonzero first-track LBA in GDI input")
+		}
+		if i > 0 {
+			// chdman extends the previous track through the gap to this LBA.
+			if err := chargeCDTrack(&limit, int64(lba-previousStart)); err != nil {
+				return err
+			}
 		}
 		sector, err := strconv.ParseInt(fields[3], 10, 32)
 		kind, kindErr := strconv.ParseInt(fields[2], 10, 32)
@@ -86,7 +95,7 @@ func ValidateGDI(path string, limit int64) error {
 		if sizes[i] == 0 || sizes[i]%sector != 0 {
 			return fmt.Errorf("GDI track must contain complete sectors")
 		}
-		previousEnd = lba + uint64(sizes[i]/sector)
+		previousStart, previousEnd = lba, lba+uint64(sizes[i]/sector)
 		if previousEnd > math.MaxInt32 {
 			return fmt.Errorf("GDI track exceeds the sector address range")
 		}
@@ -98,5 +107,5 @@ func ValidateGDI(path string, limit int64) error {
 	if i != len(sizes) {
 		return fmt.Errorf("GDI references changed during validation")
 	}
-	return nil
+	return chargeCDTrack(&limit, int64(previousEnd-previousStart))
 }

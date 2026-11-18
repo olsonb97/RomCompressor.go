@@ -49,8 +49,23 @@ func TestDolphinRawHashUsesSourceBytes(t *testing.T) {
 	if err := checkDolphinISO(path); err != nil {
 		t.Fatal(err)
 	}
-	hash, err := dolphinDiscHash(context.Background(), filepath.Join(dir, "absent-engine"), path, dir, kind.Raw)
+	hash, err := dolphinDiscHash(context.Background(), filepath.Join(dir, "absent-engine"), path, dir, kind.Raw, int64(len(data)))
 	if err != nil || hash != sha1.Sum(data) {
 		t.Fatalf("raw hash = %x, %v", hash, err)
+	}
+}
+
+func TestDolphinHashChecksProducedDiscSizeBeforeReading(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stage.gcz")
+	var header [32]byte
+	binary.LittleEndian.PutUint32(header[:], 0xb10bc001)
+	binary.LittleEndian.PutUint64(header[16:24], 4096)
+	if err := os.WriteFile(path, header[:], 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := dolphinDiscHash(context.Background(), filepath.Join(dir, "absent-engine"), path, dir, kind.GCZ, 4095)
+	if err == nil || !strings.Contains(err.Error(), "expanded size limit") {
+		t.Fatalf("expected the staged disc size to be checked before the engine runs, got %v", err)
 	}
 }
