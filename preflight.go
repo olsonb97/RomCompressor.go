@@ -74,6 +74,10 @@ func preflightSource(ctx context.Context, source string, info FileInfo, opts Opt
 	}
 	if native(opts.Format) {
 		switch opts.Format {
+		case ZIP:
+			if err := codec.ValidateZIPFilename(filepath.Base(source)); err != nil {
+				return err
+			}
 		case CSO, ZSO:
 			if info.Format != Raw || ext != ".iso" {
 				return fmt.Errorf("CSO and ZSO compression requires a raw .iso file")

@@ -3,6 +3,7 @@ package romcompressor
 import (
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"math/rand"
@@ -15,6 +16,47 @@ import (
 
 	"github.com/olsonb97/romcompressor.go/internal/disc"
 )
+
+func TestArchiveCreationWithLiteralBackslashFilename(t *testing.T) {
+	if filepath.Separator == '\\' {
+		t.Skip("a Windows filename cannot contain a literal backslash")
+	}
+	dir := t.TempDir()
+	source := filepath.Join(dir, `game\save.bin`)
+	data := []byte("saved game")
+	if err := os.WriteFile(source, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := PlanConversions(t.Context(), source, Options{})
+	if err != nil || planHas(plan, ZIP, "") || !planHas(plan, GZIP, "") {
+		t.Fatalf("unexpected archive choices: %+v, %v", plan.Targets, err)
+	}
+	packed := filepath.Join(dir, "game.zip")
+	if _, err := Convert(t.Context(), source, packed, Options{Format: ZIP}); err == nil {
+		t.Fatal("ZIP accepted a filename it cannot preserve")
+	}
+	if _, err := os.Lstat(packed); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unexpected ZIP output: %v", err)
+	}
+	packed = filepath.Join(dir, "game.gz")
+	if _, err := Convert(t.Context(), source, packed, Options{Format: GZIP}); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(packed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	r, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	var restored bytes.Buffer
+	if _, err := restored.ReadFrom(r); err != nil || r.Name != "" || !bytes.Equal(restored.Bytes(), data) {
+		t.Fatalf("unexpected gzip name %q or payload %q: %v", r.Name, restored.Bytes(), err)
+	}
+}
 
 func TestGZIPVerificationProgressReportsUnknownTotal(t *testing.T) {
 	dir := t.TempDir()

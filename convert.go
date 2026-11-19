@@ -208,7 +208,11 @@ func convertFile(ctx context.Context, source, output string, opts Options, playl
 	if !wuxOverride && (native(opts.Format) || restoreNative) {
 		err = convertNative(ctx, source, staged, info, opts, wbfs, notify)
 	} else {
-		err = fileops.RunMonitored(ctx, stage.Path(), opts.MaxOutput, func(ctx context.Context) error {
+		monitor := fileops.RunMonitored
+		if opts.Format == NSZ || opts.Format == XCZ || opts.Format == Raw && (info.Format == NSZ || info.Format == XCZ) {
+			monitor = fileops.RunMonitoredNSZ
+		}
+		err = monitor(ctx, stage.Path(), opts.MaxOutput, func(ctx context.Context) error {
 			return externalConvert(ctx, source, staged, info.Format, opts, wbfs)
 		})
 	}

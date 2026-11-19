@@ -173,6 +173,9 @@ func TestPSXPackagerRoundTripIntegration(t *testing.T) {
 	if tool == "" {
 		t.Skip("ROMCOMPRESSOR_PSXPACKAGER not set")
 	}
+	// Exercise the adapter's child-only override even on a developer machine
+	// where the .NET runtime's diagnostic endpoints are explicitly enabled.
+	t.Setenv("DOTNET_EnableDiagnostics", "1")
 	for _, mixed := range []bool{false, true} {
 		name := "data"
 		if mixed {

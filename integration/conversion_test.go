@@ -228,8 +228,7 @@ func TestDolphinRoundTripIntegration(t *testing.T) {
 	}
 	for _, format := range []romcompressor.Format{romcompressor.RVZ, romcompressor.WIA, romcompressor.GCZ} {
 		t.Run(string(format), func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-			defer cancel()
+			ctx := t.Context()
 			compressed := filepath.Join(dir, "generated."+string(format))
 			opts := romcompressor.Options{Format: format, Tools: map[string]string{"dolphin-tool": tool}}
 			if _, err := romcompressor.Convert(ctx, source, compressed, opts); err != nil {

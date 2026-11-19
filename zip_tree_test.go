@@ -124,6 +124,7 @@ func TestZIPTreeRejectsUnsafePaths(t *testing.T) {
 		"absolute":       {"/absolute.bin"},
 		"drive":          {"C:/abspath.bin"},
 		"backslash":      {".\\..\\escaped.bin"},
+		"literal slash":  {`game\save.bin`},
 		"device":         {"nested/CoN .bin"},
 		"alternate data": {"nested/file.bin:stream"},
 		"same path":      {"game.bin", "game.bin"},

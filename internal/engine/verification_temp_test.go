@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,15 +51,46 @@ func runVerificationTestEngine(engine string) error {
 	if stage == "" {
 		return errors.New("missing verification scratch directory")
 	}
-	for _, name := range []string{"TMPDIR", "TMP", "TEMP"} {
-		if os.Getenv(name) != stage {
+	mode := os.Getenv("ROMCOMPRESSOR_TEST_VERIFY_MODE")
+	scratch := os.Getenv("TMPDIR")
+	for _, name := range []string{"TMP", "TEMP"} {
+		if os.Getenv(name) != scratch {
 			return fmt.Errorf("engine %s was not redirected to private scratch", name)
 		}
+	}
+	if engine == "nsz" && filepath.Separator == '/' {
+		homeDir, err := os.Stat(stage)
+		if err != nil {
+			return err
+		}
+		tempDir, err := os.Stat(scratch)
+		if err != nil || !os.SameFile(homeDir, tempDir) {
+			return errors.New("NSZ socket path does not refer to the selected stage")
+		}
+		dir := filepath.Join(scratch, "pymp-abcdefgh")
+		if err := os.Mkdir(dir, 0700); err != nil {
+			return err
+		}
+		defer os.Remove(dir)
+		listener, err := net.ListenUnix("unix", &net.UnixAddr{Net: "unix", Name: filepath.Join(dir, "listener-abcdefgh")})
+		if err != nil {
+			return err
+		}
+		if mode == "orphan" && filepath.Ext(os.Args[len(os.Args)-1]) == ".nsz" {
+			listener.SetUnlinkOnClose(false)
+		}
+		defer listener.Close()
+		if err := os.WriteFile(os.Getenv("ROMCOMPRESSOR_TEST_VERIFY_MARKER")+".temp", []byte(scratch), 0600); err != nil {
+			return err
+		}
+		// Keep the live socket visible for at least one monitor scan.
+		time.Sleep(200 * time.Millisecond)
+	} else if scratch != stage {
+		return errors.New("engine temp path differs from the selected stage")
 	}
 	if err := os.WriteFile(os.Getenv("ROMCOMPRESSOR_TEST_VERIFY_MARKER"), []byte(stage), 0600); err != nil {
 		return err
 	}
-	mode := os.Getenv("ROMCOMPRESSOR_TEST_VERIFY_MODE")
 	size := 64
 	if mode == "limit" {
 		size = 64 << 10
@@ -88,6 +120,27 @@ func runVerificationTestEngine(engine string) error {
 	case "nsz":
 		name := filepath.Base(os.Args[len(os.Args)-1])
 		encoder := json.NewEncoder(os.Stdout)
+		if mode == "orphan" {
+			// Both conversions copy the generated input exactly; the only
+			// defect is the socket the last invocation leaves in its stage.
+			ext := filepath.Ext(name)
+			suffix := ".nsz"
+			if ext == suffix {
+				suffix = ".nsp"
+			}
+			output := filepath.Join(argument("--output"), strings.TrimSuffix(name, ext)+suffix)
+			data, err := os.ReadFile(os.Args[len(os.Args)-1])
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(output, data, 0600); err != nil {
+				return err
+			}
+			if err := encoder.Encode(map[string]any{"type": "complete", "file": output}); err != nil {
+				return err
+			}
+			return encoder.Encode(map[string]any{"type": "summary", "success": true, "errorCount": 0})
+		}
 		for _, message := range []map[string]any{
 			{"type": "info", "message": "[VERIFY NSZ] " + name},
 			{"type": "info", "action": "VERIFIED"},
@@ -101,12 +154,39 @@ func runVerificationTestEngine(engine string) error {
 	return nil
 }
 
+func TestSwitchConversionRefusesLingeringWorkerSocket(t *testing.T) {
+	if filepath.Separator != '/' {
+		t.Skip("NSZ uses Unix sockets for its POSIX workers")
+	}
+	dir, outputDir := t.TempDir(), t.TempDir()
+	source, keys := filepath.Join(dir, "game.nsp"), filepath.Join(dir, "test.keys")
+	for _, path := range []string{source, keys} {
+		if err := os.WriteFile(path, []byte("generated fixture"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("ROMCOMPRESSOR_TEST_VERIFY_ENGINE", "nsz")
+	t.Setenv("ROMCOMPRESSOR_TEST_VERIFY_MODE", "orphan")
+	t.Setenv("ROMCOMPRESSOR_TEST_VERIFY_MARKER", filepath.Join(dir, "marker"))
+	opts := Config{Format: kind.NSZ, Keys: keys, MaxOutput: 4096, Tools: map[string]string{"nsz": os.Args[0]}}
+	err := convertSwitch(t.Context(), source, filepath.Join(outputDir, "packed.nsz"), kind.Raw, opts)
+	if err == nil || !strings.Contains(err.Error(), "link or special file") {
+		t.Fatalf("expected the final scratch check to reject a leftover socket, got %v", err)
+	}
+	if files, err := os.ReadDir(outputDir); err != nil || len(files) != 0 {
+		t.Fatalf("output or staging survived rejection: %v, %v", files, err)
+	}
+}
+
 func TestStandaloneVerificationUsesSelectedScratchParent(t *testing.T) {
 	for _, engine := range []string{"dolphin", "azahar", "nsz"} {
 		for _, mode := range []string{"success", "failure", "cancel", "limit"} {
 			t.Run(engine+"/"+mode, func(t *testing.T) {
 				directory := t.TempDir()
 				parent, fallback := filepath.Join(directory, "selected"), filepath.Join(directory, "default")
+				if engine == "nsz" && filepath.Separator == '/' {
+					parent = filepath.Join(directory, strings.Repeat("selected", 12))
+				}
 				for _, path := range []string{parent, fallback} {
 					if err := os.Mkdir(path, 0700); err != nil {
 						t.Fatal(err)
@@ -179,6 +259,15 @@ func TestStandaloneVerificationUsesSelectedScratchParent(t *testing.T) {
 				}
 				if _, err := os.Lstat(string(observed)); !os.IsNotExist(err) {
 					t.Fatalf("verification scratch was not cleaned: %v", err)
+				}
+				if engine == "nsz" && filepath.Separator == '/' {
+					alias, err := os.ReadFile(marker + ".temp")
+					if err != nil || string(alias) == string(observed) {
+						t.Fatalf("missing short socket path: %v", err)
+					}
+					if _, err := os.Lstat(filepath.Dir(string(alias))); !os.IsNotExist(err) {
+						t.Fatalf("short NSZ path survived %s: %v", mode, err)
+					}
 				}
 				entries, readErr := os.ReadDir(parent)
 				if readErr != nil || len(entries) != 1 || entries[0].Name() != "keep.txt" {

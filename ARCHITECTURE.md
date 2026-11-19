@@ -144,8 +144,8 @@ Publication uses exclusive MoveFile on Windows, Renameat2 with RENAME_NOREPLACE
 on Linux, and RenamexNp with RENAME_EXCL on macOS. Other Unix targets use hard links.
 These operations keep existing destinations intact during concurrent conversions.
 The destination filesystem must support the required exclusive operation; otherwise
-publication returns an error. Some Windows-mounted WSL filesystems do not support
-Linux's exclusive rename operation.
+publication returns an error. On Linux, the legacy exfat-fuse 1.3.0 driver
+and some Windows-mounted WSL filesystems lack exclusive rename support.
 Staged files are synced before publication. Multi-file
 publication supports rollback on reported failures, not a persistent crash journal.
 

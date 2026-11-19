@@ -7,16 +7,27 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 )
 
 // RunMonitored runs an engine while periodically checking its staging budget.
 // The final scan also catches output produced just before engine exit.
 func RunMonitored(ctx context.Context, stage string, limit int64, run func(context.Context) error) error {
+	return runMonitored(ctx, stage, limit, false, run)
+}
+
+// RunMonitoredNSZ also permits Python's transient multiprocessing listener
+// inside NSZ scratch while the engine runs. Its final scan is strict.
+func RunMonitoredNSZ(ctx context.Context, stage string, limit int64, run func(context.Context) error) error {
+	return runMonitored(ctx, stage, limit, true, run)
+}
+
+func runMonitored(ctx context.Context, stage string, limit int64, nsz bool, run func(context.Context) error) error {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	done, stopped := make(chan struct{}), make(chan struct{})
-	go Monitor(ctx, cancel, stage, limit, 10000, done, stopped)
+	go monitor(ctx, cancel, stage, limit, 10000, nsz, done, stopped)
 	err := run(ctx)
 	close(done)
 	<-stopped
@@ -29,6 +40,10 @@ func RunMonitored(ctx context.Context, stage string, limit int64, run func(conte
 // Monitor bounds staging bytes and entries until done closes or ctx is cancelled.
 // It always closes stopped when monitoring has finished.
 func Monitor(ctx context.Context, cancel context.CancelCauseFunc, stage string, limit int64, maxEntries int, done <-chan struct{}, stopped chan<- struct{}) {
+	monitor(ctx, cancel, stage, limit, maxEntries, false, done, stopped)
+}
+
+func monitor(ctx context.Context, cancel context.CancelCauseFunc, stage string, limit int64, maxEntries int, nsz bool, done <-chan struct{}, stopped chan<- struct{}) {
 	defer close(stopped)
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
@@ -41,7 +56,7 @@ func Monitor(ctx context.Context, cancel context.CancelCauseFunc, stage string, 
 			return
 		case <-ticker.C:
 		}
-		if err := Scan(ctx, stage, limit, maxEntries); err != nil {
+		if err := scan(ctx, stage, limit, maxEntries, nsz && !finished); err != nil {
 			cancel(err)
 			return
 		}
@@ -54,6 +69,10 @@ func Monitor(ctx context.Context, cancel context.CancelCauseFunc, stage string, 
 // Scan checks a staging tree in bounded batches with at most one directory open.
 // Engines may remove scratch entries while a scan is in progress.
 func Scan(ctx context.Context, stage string, limit int64, maxEntries int) error {
+	return scan(ctx, stage, limit, maxEntries, false)
+}
+
+func scan(ctx context.Context, stage string, limit int64, maxEntries int, allowNSZListener bool) error {
 	count := 1 // Include the staging root.
 	var total int64
 	pending := []string{stage}
@@ -103,6 +122,9 @@ func Scan(ctx context.Context, stage string, limit int64, maxEntries int) error 
 					}
 					total += info.Size()
 				default:
+					if allowNSZListener && info.Mode().Type() == os.ModeSocket && isNSZListener(stage, path, entry.Name()) {
+						continue
+					}
 					return fmt.Errorf("engine created a link or special file")
 				}
 			}
@@ -130,6 +152,21 @@ func Scan(ctx context.Context, stage string, limit int64, maxEntries int) error 
 		}
 	}
 	return ctx.Err()
+}
+
+// CPython creates pymp-XXXXXXXX/listener-XXXXXXXX inside its temp directory.
+// NSZ uses the verification stage itself or a private nsz-* conversion child.
+func isNSZListener(stage, dir, name string) bool {
+	if runtime.GOOS == "windows" || !pythonTempName(name, "listener-") || !pythonTempName(filepath.Base(dir), "pymp-") {
+		return false
+	}
+	parent := filepath.Dir(dir)
+	return parent == stage || filepath.Dir(parent) == stage && strings.HasPrefix(filepath.Base(parent), "nsz-")
+}
+
+func pythonTempName(name, prefix string) bool {
+	suffix, ok := strings.CutPrefix(name, prefix)
+	return ok && len(suffix) == 8 && strings.Trim(suffix, "abcdefghijklmnopqrstuvwxyz0123456789_") == ""
 }
 
 func scratchEntryGone(ctx context.Context, path string, err error) bool {

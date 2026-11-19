@@ -74,7 +74,7 @@ func Verify(ctx context.Context, path string, format string, opts Config) error 
 		if err != nil {
 			return err
 		}
-		return withVerificationStage(ctx, opts, "romcompressor-dolphin-", opts.MaxOutput, func(ctx context.Context, stage fileops.Stage) error {
+		return withVerificationStage(ctx, opts, "dolphin", opts.MaxOutput, func(ctx context.Context, stage fileops.Stage) error {
 			_, err := dolphinHashWithEnvironment(ctx, tool, path, stage.Path(), temporaryEnvironment(stage.Path()))
 			return err
 		})
@@ -83,7 +83,7 @@ func Verify(ctx context.Context, path string, format string, opts Config) error 
 		if err != nil {
 			return err
 		}
-		return withVerificationStage(ctx, opts, "romcompressor-nsz-", opts.MaxOutput, func(ctx context.Context, stage fileops.Stage) error {
+		return withVerificationStage(ctx, opts, "nsz", opts.MaxOutput, func(ctx context.Context, stage fileops.Stage) error {
 			engineSource, err := prepareSwitchInput(ctx, path, "."+string(format), stage.Path(), opts.MaxOutput)
 			if err != nil {
 				return err

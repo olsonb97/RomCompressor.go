@@ -42,12 +42,15 @@ func encode(ctx context.Context, format string, src io.ReaderAt, size int64, dst
 	if size > opts.MaxOutput {
 		return errors.New("input exceeds expanded size limit")
 	}
-	name := path.Base(strings.ReplaceAll(opts.Name, "\\", "/"))
+	name := path.Base(opts.Name)
 	if name == "." || name == ".." || name == "/" || name == "" {
 		name = "game.bin"
 	}
 	switch format {
 	case "zip":
+		if err := ValidateZIPFilename(name); err != nil {
+			return err
+		}
 		w := zip.NewWriter(dst)
 		entry, err := w.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Deflate})
 		if err != nil {
@@ -57,8 +60,6 @@ func encode(ctx context.Context, format string, src io.ReaderAt, size int64, dst
 		return errors.Join(err, w.Close())
 	case "gzip":
 		w := gzip.NewWriter(dst)
-		// GZIP's optional filename is Latin-1. Omit it for Unicode names rather
-		// than changing the user's filename or failing a valid compression job.
 		w.Name = gzipName(name)
 		err := copyStream(ctx, w, io.NewSectionReader(src, 0, size), size, opts)
 		return errors.Join(err, w.Close())
@@ -79,9 +80,19 @@ func encode(ctx context.Context, format string, src io.ReaderAt, size int64, dst
 	}
 }
 
+// ValidateZIPFilename checks that a source basename can be stored without
+// turning a literal character into a directory separator.
+func ValidateZIPFilename(name string) error {
+	if strings.ContainsRune(name, '\\') {
+		return errors.New("ZIP cannot preserve a literal backslash in a filename")
+	}
+	return nil
+}
+
 func gzipName(name string) string {
+	// Omit the optional Latin-1 name if readers could interpret it as a path.
 	for _, char := range name {
-		if char == 0 || char > 255 {
+		if char == 0 || char == '\\' || char > 255 {
 			return ""
 		}
 	}

@@ -105,6 +105,11 @@ func convertSwitch(ctx context.Context, source, output string, input string, opt
 			return fmt.Errorf("verify restored %s: %w", strings.ToUpper(targetExt[1:]), err)
 		}
 	}
+	// The outer conversion monitor's last scan runs after this nested stage
+	// is removed. Check it strictly here, after all NSZ workers have exited.
+	if err := fileops.Scan(ctx, engineDir, opts.MaxOutput, 10000); err != nil {
+		return err
+	}
 	return os.Rename(generated, output)
 }
 
@@ -200,16 +205,39 @@ func runSwitch(ctx context.Context, tool string, stage fileops.Stage, status *sw
 	if err := stage.Check(); err != nil {
 		return err
 	}
+	tempDir := stage.Path()
+	// Python's multiprocessing.Manager appends pymp-*/listener-* and binds
+	// an AF_UNIX socket. Even ordinary destination paths can exceed the
+	// kernel's socket pathname limit once the round-trip stage is nested.
+	if filepath.Separator == '/' && len(tempDir) > 64 {
+		alias, err := fileops.NewStage("/tmp", "rc-nsz-")
+		if err != nil {
+			return fmt.Errorf("create short NSZ scratch path: %w", err)
+		}
+		defer alias.Cleanup()
+		tempDir = filepath.Join(alias.Path(), "t")
+		target, err := filepath.Abs(stage.Path())
+		if err != nil {
+			return err
+		}
+		if err := os.Symlink(target, tempDir); err != nil {
+			return fmt.Errorf("link short NSZ scratch path: %w", err)
+		}
+	}
 	// Keep NSZ's user-profile key fallbacks inside staging. NSZ can also try
 	// default files beside its executable after an explicit file fails to load.
 	env := []string{"HOME=" + stage.Path(), "USERPROFILE=" + stage.Path(), "XDG_CONFIG_HOME=" + stage.Path()}
-	env = append(env, temporaryEnvironment(stage.Path())...)
+	env = append(env, temporaryEnvironment(tempDir)...)
 	_, err := process.Execute(ctx, status, env, "", tool, append([]string{"--machine-readable"}, args...)...)
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
 	if err != nil {
-		return fmt.Errorf("NSZ could not process this input; check the image layout, keys file and NSZ version (5.0 or newer)")
+		scratchHint := ""
+		if filepath.Separator == '/' {
+			scratchHint = "; the scratch filesystem must support Unix sockets"
+		}
+		return fmt.Errorf("NSZ could not process this input; check the image layout, keys file and NSZ version (5.0 or newer)%s", scratchHint)
 	}
 	if err = status.consume(); err != nil {
 		return err

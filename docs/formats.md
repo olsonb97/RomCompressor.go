@@ -9,12 +9,17 @@ until you have confirmed the result works in your intended emulator or device.
 - **ZIP / gzip:** ZIP accepts a file or directory. Single-member extraction uses
   an explicit destination; `--all` restores the complete ZIP tree, including empty
   directories. Verification checks all ZIP members by default. Gzip restoration
-  reads concatenated members in order under one output limit.
+  reads concatenated members in order under one output limit. On Unix, ZIP
+  creation refuses a literal backslash in a filename. Gzip accepts the file
+  and omits its optional filename field in that case.
   Folder restoration uses private owner read/write permissions and preserves the
   owner-executable bit on Unix. Original modification times are not restored.
 - **CSO / ZSO:** creation writes CSO v1 or ZSO v1. Restoration accepts CSO v0/v1
   and ZSO v1. CSO v2 is rejected. These containers do not provide a whole-image
   checksum, so standalone structural verification cannot establish provenance.
+  Use CSO for the tested PPSSPP core (55d8795). It booted the ISO and CSO
+  copies of the same PSP game and rejected the ZSO copy as unrecognized.
+  See [PPSSPP's disc format detection](https://github.com/hrydgard/ppsspp/blob/55d87956fcdd5a93b7e0d9129c357cbcf2089f96/Core/FileSystems/BlockDevices.cpp#L251).
 - **ECM:** models recognized aligned CD sectors and preserves every source byte.
   Keep a separate CUE with the original track set. ECM processes one image file.
 - **WBFS / Nintendo CISO:** creation requires full-sized images and omits only
@@ -130,6 +135,9 @@ content both round-tripped byte for byte with NSZ 5.0. A retail-layout XCI
 with nonzero certificate-region data was refused. NSZ may stage an input
 whose resolved filename lacks the expected lowercase extension. Reserve space
 for the compressed output, private copies, and uncompressed verification output.
+On Linux and macOS, the scratch filesystem must support Unix sockets. For long
+paths, RomCompressor creates a temporary link under `/tmp` so NSZ can open its
+worker socket. The game data stays on the selected filesystem.
 
 ## Wii U title archives
 

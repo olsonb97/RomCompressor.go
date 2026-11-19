@@ -75,7 +75,9 @@ func compressPBP(ctx context.Context, source, output string, opts Config) error 
 	}
 	// Pass only a normalized private descriptor and its generated BIN to the
 	// engine. Its wildcard input handling never sees the caller's filenames.
-	env := []string{"TMP=" + engineDir, "TEMP=" + engineDir, "TMPDIR=" + engineDir}
+	// The .NET debugger creates IPC files under TMPDIR on Unix. Keep the
+	// engine's staging directory restricted to regular files and directories.
+	env := append(temporaryEnvironment(engineDir), "DOTNET_EnableDiagnostics=0")
 	if _, err := process.Execute(ctx, nil, env, engineDir, tool, "-i", cue, "-o", engineDir, "-v", "1", "-s"); err != nil {
 		return err
 	}

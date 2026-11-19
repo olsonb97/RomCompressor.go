@@ -332,7 +332,7 @@ func verify3DS(ctx context.Context, source string, opts Config) error {
 	if limit <= 0 {
 		limit = kind.DefaultMaxOutput
 	}
-	return withVerificationStage(ctx, opts, "romcompressor-azahar-", limit, func(ctx context.Context, stage fileops.Stage) error {
+	return withVerificationStage(ctx, opts, "azahar", limit, func(ctx context.Context, stage fileops.Stage) error {
 		env := append(threeDSEnvironment(stage.Path()), temporaryEnvironment(stage.Path())...)
 		_, err := extract3DS(ctx, tool, source, stage.Path(), env, h)
 		return err

@@ -2,12 +2,10 @@ package integration_test
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	romcompressor "github.com/olsonb97/romcompressor.go"
 	"github.com/olsonb97/romcompressor.go/internal/fileops"
@@ -21,10 +19,9 @@ func TestAzaharRoundTripIntegration(t *testing.T) {
 	if tool == "" {
 		t.Skip("ROMCOMPRESSOR_AZAHAR is not set")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
 	for _, format := range []romcompressor.Format{romcompressor.Z3DSX, romcompressor.ZCXI, romcompressor.ZCCI, romcompressor.ZCIA} {
 		t.Run(string(format), func(t *testing.T) {
+			ctx := t.Context()
 			dir := t.TempDir()
 			data := generatedAzaharInput(format)
 			source := filepath.Join(dir, "generated homebrew"+kind.ThreeDSRawExtension(string(format)))

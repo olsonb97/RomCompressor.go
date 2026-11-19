@@ -9,16 +9,20 @@ import (
 
 // withVerificationStage owns standalone verification scratch. Conversion
 // staging stays beside its output so exclusive publication remains on one volume.
-func withVerificationStage(ctx context.Context, opts Config, prefix string, limit int64, run func(context.Context, fileops.Stage) error) error {
+func withVerificationStage(ctx context.Context, opts Config, engine string, limit int64, run func(context.Context, fileops.Stage) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	stage, err := fileops.NewStage(opts.TempDir, prefix)
+	stage, err := fileops.NewStage(opts.TempDir, "romcompressor-"+engine+"-")
 	if err != nil {
 		return fmt.Errorf("create verification scratch directory: %w", err)
 	}
 	defer stage.Cleanup()
-	return fileops.RunMonitored(ctx, stage.Path(), limit, func(ctx context.Context) error {
+	monitor := fileops.RunMonitored
+	if engine == "nsz" {
+		monitor = fileops.RunMonitoredNSZ
+	}
+	return monitor(ctx, stage.Path(), limit, func(ctx context.Context) error {
 		if err := stage.Check(); err != nil {
 			return err
 		}
